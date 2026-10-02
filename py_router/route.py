@@ -4859,6 +4859,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         if _mvnames:
                             from kicad_oracle import oracle_reconnect
                             _cap_cfg = GridRouteConfig(
+                                same_net_pad_clearance=config.same_net_pad_clearance,
                                 clearance=config.clearance,
                                 track_width=config.track_width,
                                 via_size=config.via_size,
@@ -5377,6 +5378,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 _zna = sorted({n for n, _l in _zpairs_all})
                 results_data['plane_finalize_oracle'] = {
                     'nets': _zna,
+                    'same_net_pad_clearance': config.same_net_pad_clearance,
                     'clearance': config.clearance,
                     'track_width': config.track_width,
                     'via_size': config.via_size,
@@ -5461,6 +5463,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # Costs are soft, so a weld that must touch a plane layer
                 # (a GND link onto In1) still can.
                 _ocfg = GridRouteConfig(
+                    same_net_pad_clearance=config.same_net_pad_clearance,
                     clearance=config.clearance,
                     track_width=config.track_width,
                     via_size=config.via_size, via_drill=config.via_drill,

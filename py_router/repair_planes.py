@@ -3627,7 +3627,11 @@ Examples:
         # this leg's welds can violate the board's own rules on inner layers,
         # and (b) computes the fab floor as fab_floors(2)=0.127 instead of
         # fab_floors(4)=0.1, refusing welds the fab can actually make.
+        from protected_nets import read_snpc_for_pcb_data
         _ocfg = GridRouteConfig(
+            same_net_pad_clearance=(args.same_net_pad_clearance
+                if args.same_net_pad_clearance is not None else
+                read_snpc_for_pcb_data(None, args.input_file)),
             clearance=args.clearance, track_width=args.track_width,
             via_size=args.via_size, via_drill=args.via_drill,
             grid_step=args.grid_step,

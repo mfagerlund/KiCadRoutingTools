@@ -2627,7 +2627,12 @@ def oracle_reconnect(board_file: str, net_names, config,
                     _h2h = getattr(config, 'hole_to_hole_clearance', 0.2)
                     from geometry_utils import (
                         point_to_segment_distance as _p2s649)
-                    _ok649 = True
+                    # Direct stitching bypasses A*: retain the same pad/paste
+                    # keep-out as the region router, including at this fallback.
+                    from routing_config import GridCoord
+                    _ok649 = not (config.same_net_pad_clearance > 0 and
+                        base_obstacles.is_via_blocked(
+                            *GridCoord(config.grid_step).to_grid(_vx, _vy)))
                     for _s2 in pcb_data.segments:
                         if _s2.net_id != net_id and _p2s649(
                                 _vx, _vy, _s2.start_x, _s2.start_y,

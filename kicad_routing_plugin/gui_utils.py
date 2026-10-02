@@ -996,6 +996,7 @@ def run_kicad_oracle_on_live_board(board, net_names, *, clearance,
                                    power_net_widths=None,
                                    net_track_widths=None,
                                    net_layer_widths=None,
+                                   same_net_pad_clearance=-1.0,
                                    progress_callback=None):
     """Staged-save kicad-oracle recheck against the LIVE pcbnew board.
 
@@ -1053,6 +1054,7 @@ def run_kicad_oracle_on_live_board(board, net_names, *, clearance,
         if net_layer_widths:
             _cfg_kw['net_layer_widths'] = dict(net_layer_widths)
         ocfg = GridRouteConfig(
+            same_net_pad_clearance=same_net_pad_clearance,
             clearance=clearance, track_width=track_width,
             via_size=via_size, via_drill=via_drill, grid_step=grid_step,
             board_edge_clearance=_edge_mm, **_cfg_kw)

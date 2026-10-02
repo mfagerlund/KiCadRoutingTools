@@ -3675,6 +3675,15 @@ def build_base_obstacles(
     add_user_keepout_obstacles(obstacles, pcb_data, config, coord, num_layers)
     add_rule_area_keepout_obstacles(obstacles, pcb_data, config, layers=routing_layers)
 
+    # Excluded nets remain reachable by tracks, but their SMD pads/paste
+    # still forbid NEW vias when the same-net clearance is active. This
+    # shared map serves region joins and every oracle routing rung.
+    from obstacle_map import same_net_pad_via_keepout_cells
+    for net_id in exclude_net_ids:
+        cells = same_net_pad_via_keepout_cells(pcb_data, net_id, config)
+        if len(cells):
+            obstacles.add_blocked_vias_batch(cells)
+
     return obstacles, layer_map
 
 
