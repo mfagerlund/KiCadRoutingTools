@@ -111,6 +111,31 @@ def _smooth_skip_net_ids(pcb_data):
             if getattr(net, 'name', None) in names}
 
 
+def _locked_copper_net_ids(pcb_data):
+    """Net ids carrying KiCad-locked track/via copper.
+
+    A locked item pins that copper's exact geometry. Treat the whole net as
+    read-only for cleanup shape/removal passes; otherwise a pass can keep the
+    net connected by replacing the locked fragment with a new, unlocked one.
+    """
+    ids = {s.net_id for s in getattr(pcb_data, 'segments', []) or ()
+           if getattr(s, 'locked', False)}
+    ids |= {v.net_id for v in getattr(pcb_data, 'vias', []) or ()
+            if getattr(v, 'locked', False)}
+    ids.discard(0)
+    return ids
+
+
+def _without_net_ids(scope_net_ids, blocked_ids, pcb_data):
+    blocked_ids = set(blocked_ids or ())
+    if not blocked_ids:
+        return scope_net_ids
+    if scope_net_ids is None:
+        return ({s.net_id for s in getattr(pcb_data, 'segments', []) or ()}
+                | {v.net_id for v in getattr(pcb_data, 'vias', []) or ()}) - blocked_ids
+    return set(scope_net_ids) - blocked_ids
+
+
 @dataclass
 class CleanupOutcome:
     """What the pipeline did, for the caller's writer/summary plumbing."""
@@ -273,6 +298,9 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
         if progress_callback:
             progress_callback(0, 0, f"{label}Cleanup: {stage}...")
 
+    _locked_scope = _locked_copper_net_ids(pcb_data)
+    _mutable_scope = _without_net_ids(scope_net_ids, _locked_scope, pcb_data)
+
     _trace('start')
     if snap:
         _prog("stub-gap snap")
@@ -317,7 +345,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     if graze:
         _prog("graze prune")
         _gz_segs, _gz_nets, _gz_strip = prune_grazing_segments(
-            results, pcb_data, scope_net_ids, clearance=config.clearance,
+            results, pcb_data, _mutable_scope, clearance=config.clearance,
             check_foreign_segments=True, keep_input_copper=keep_input_copper,
             net_clearances=_nc)
         counts['graze_pruned'] = _gz_segs
@@ -331,7 +359,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
         # overlap is non-coincident), by welding the solidly-overlapping neighbours
         # coincident (picodvi DVI_CK terminal-leg jog).
         _wd_segs, _wd_nets, _wd_strip = weld_redundant_grazing_detours(
-            results, pcb_data, scope_net_ids, clearance=config.clearance,
+            results, pcb_data, _mutable_scope, clearance=config.clearance,
             keep_input_copper=keep_input_copper, net_clearances=_nc)
         counts['detours_welded'] = _wd_segs
         _trace('weld_detour')
@@ -343,7 +371,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     if octolinear:
         _prog("octolinear graze re-bend")
         _nz_segs, _nz_nets, _nz_strip, _ = nudge_grazing_octolinear(
-            results, pcb_data, scope_net_ids, clearance=config.clearance,
+            results, pcb_data, _mutable_scope, clearance=config.clearance,
             keep_input_copper=keep_input_copper,
             net_clearances=_nc, board_edge_clearance=_bec)
         counts['octolinear_nudged'] = _nz_segs
@@ -355,7 +383,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
 
     _prog("graze micro-shift")
     _ms_segs, _ms_nets, _ms_strip, _ = nudge_grazing_microshift(
-        results, pcb_data, scope_net_ids, clearance=config.clearance,
+        results, pcb_data, _mutable_scope, clearance=config.clearance,
         max_shift=(microshift_max_shift if microshift_max_shift is not None
                    else config.grid_step / 2),
         keep_input_copper=keep_input_copper,
@@ -377,7 +405,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     if via_nudge:
         _prog("via nudge")
         _vn_moved, _vn_nets, _ = nudge_grazing_vias(
-            results, pcb_data, scope_net_ids, clearance=config.clearance,
+            results, pcb_data, _mutable_scope, clearance=config.clearance,
             hole_to_hole=config.hole_to_hole_clearance,
             # #339 rework: one grid cell (was grid_step/2), capped per-via at
             # via_size/4 inside the fn. grid_step/2 (~0.025 at fine grid) was too
@@ -402,12 +430,14 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     # welds to). Restrict their scope instead of threading a new parameter
     # through each pass.
     _sub_scope = scope_net_ids
+    if _locked_scope:
+        _sub_scope = _without_net_ids(_sub_scope, _locked_scope, pcb_data)
     if protect_net_ids:
-        if scope_net_ids is None:
+        if _sub_scope is None:
             _sub_scope = ({s.net_id for s in pcb_data.segments}
                           | {v.net_id for v in pcb_data.vias}) - set(protect_net_ids)
         else:
-            _sub_scope = set(scope_net_ids) - set(protect_net_ids)
+            _sub_scope = set(_sub_scope) - set(protect_net_ids)
     if cycles:
         _prog("cycle prune")
         _cy_segs, _cy_nets, _cy_strip = prune_redundant_cycles(
@@ -467,8 +497,8 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
 
     _prog("dead-end sweep")
     _de_segs, _de_vias, _de_strip = sweep_dead_ends(
-        results, pcb_data, scope_net_ids,
-        protect_net_ids=protect_net_ids,
+        results, pcb_data, _mutable_scope,
+        protect_net_ids=(set(protect_net_ids or ()) | _locked_scope),
         keep_input_copper=keep_input_copper,
         # #672: protected (unfinished) nets still shed sub-CELL dead-end
         # slivers -- rip/restore/prune debris no landing needs. One routing
@@ -560,7 +590,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
         counts['soft_joints_bridged'] = 0
     else:
         _prog("soft-joint bridging")
-        _bridged = close_soft_joints(results, pcb_data, scope_net_ids, config)
+        _bridged = close_soft_joints(results, pcb_data, _mutable_scope, config)
         counts['soft_joints_bridged'] = _bridged
         if _bridged:
             print(f"{label}Bridged {_bridged} same-net soft joint(s) with a tiny "
@@ -607,7 +637,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     if merge_collinear and env_knobs.MERGE_COLLINEAR:
         _prog("collinear merge")
         _mc_n, _mc_nets, _mc_strip, _mc_added, _mc_stats = merge_collinear_segments(
-            results, pcb_data, scope_net_ids,
+            results, pcb_data, _mutable_scope,
             keep_input_copper=keep_input_copper)
         counts['collinear_merged'] = _mc_n
         counts['collinear_joints'] = _mc_stats.get('joints', 0)

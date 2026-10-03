@@ -617,6 +617,12 @@ def _late_strict_collapse1063(pcb_data, output_file, return_results, results_dat
                    if final_sig.get(n) != (input_signature or {}).get(n)}
         names = set(scope_names) | changed
         scope = {nid for nid, nm in name_of.items() if nm in names}
+        locked_scope = {s.net_id for s in getattr(board, 'segments', []) or ()
+                        if getattr(s, 'locked', False)}
+        locked_scope |= {v.net_id for v in getattr(board, 'vias', []) or ()
+                         if getattr(v, 'locked', False)}
+        locked_scope.discard(0)
+        scope -= locked_scope
         before_s, before_v = list(board.segments), list(board.vias)
         _stats = {}
         collapse_strict_redundant(
@@ -6472,6 +6478,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         _via_in_pad962 = _ship_via_protection962(
             pcb_data, output_file, return_results, locals().get('results_data'),
             _input_vias962)
+
+    if final_reconcile and output_file and os.path.isfile(output_file):
+        from kicad_writer import assert_locked_copper_preserved as _assert_locked_copper_preserved
+        _assert_locked_copper_preserved(input_file, output_file)
 
     # ---- POWER WIDTHS (#1033) ---------------------------------------------
     # Disclosure, not a gate: per requested-width net, how much of the copper

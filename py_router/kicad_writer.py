@@ -5,10 +5,90 @@ from __future__ import annotations
 
 import re
 import uuid
+from collections import Counter
 from typing import List, Dict, Tuple, Optional
 
 from kicad_parser import Pad, is_kicad_10, _unescape_kicad_string
 from routing_utils import pos_key, POSITION_DECIMALS
+
+
+def _locked_item_sig(item, net_name_of):
+    """Geometry signature for locked routed copper, keyed by its own UUID.
+
+    The writer copies input text and appends new routed copper, so a locked
+    input track/via must remain locked and geometrically identical in the final
+    file. Coordinates are rounded at writer precision: textual round-trips may
+    normalize spelling, but not KiCad geometry.
+    """
+    if hasattr(item, 'start_x'):
+        a = (round(item.start_x, 6), round(item.start_y, 6))
+        b = (round(item.end_x, 6), round(item.end_y, 6))
+        return ('segment', getattr(item, 'uuid', '') or '',
+                net_name_of(getattr(item, 'net_id', 0)),
+                getattr(item, 'layer', ''),
+                min(a, b), max(a, b), round(getattr(item, 'width', 0.0) or 0.0, 6))
+    return ('via', getattr(item, 'uuid', '') or '',
+            net_name_of(getattr(item, 'net_id', 0)),
+            round(getattr(item, 'x', 0.0) or 0.0, 6),
+            round(getattr(item, 'y', 0.0) or 0.0, 6),
+            tuple(getattr(item, 'layers', []) or ()),
+            round(getattr(item, 'size', 0.0) or 0.0, 6),
+            round(getattr(item, 'drill', 0.0) or 0.0, 6))
+
+
+def _locked_copper_index(pcb):
+    def net_name(nid):
+        n = getattr(pcb, 'nets', {}).get(nid)
+        return getattr(n, 'name', nid)
+
+    by_uuid = {}
+    no_uuid = Counter()
+    for item in list(getattr(pcb, 'segments', []) or ()) + list(getattr(pcb, 'vias', []) or ()):
+        if not getattr(item, 'locked', False):
+            continue
+        sig = _locked_item_sig(item, net_name)
+        uid = sig[1]
+        if uid:
+            by_uuid[uid] = sig
+        else:
+            no_uuid[sig] += 1
+    return by_uuid, no_uuid
+
+
+def assert_locked_copper_preserved(input_file: str, output_file: str) -> None:
+    """Raise if any input `(locked yes)` track/via was lost or changed.
+
+    This is a writer-side tripwire for the user's copper contract. It catches
+    strip lists, layer/net swaps, late cleanup passes, or re-emission paths that
+    accidentally replace locked input copper with fresh unlocked copper.
+    """
+    from kicad_parser import parse_kicad_pcb
+
+    src = parse_kicad_pcb(input_file)
+    ref_by_uuid, ref_no_uuid = _locked_copper_index(src)
+    if not ref_by_uuid and not ref_no_uuid:
+        return
+
+    out = parse_kicad_pcb(output_file)
+    got_by_uuid, got_no_uuid = _locked_copper_index(out)
+
+    problems = []
+    for uid, sig in ref_by_uuid.items():
+        got = got_by_uuid.get(uid)
+        if got is None:
+            problems.append(f"missing {uid[:8]}")
+        elif got != sig:
+            problems.append(f"changed {uid[:8]}")
+    missing_no_uuid = ref_no_uuid - got_no_uuid
+    for sig, n in missing_no_uuid.items():
+        problems.append(f"missing uuid-less {sig[0]} x{n}")
+
+    if problems:
+        shown = ', '.join(problems[:8])
+        if len(problems) > 8:
+            shown += f", ... +{len(problems) - 8}"
+        raise RuntimeError(
+            f"locked copper changed while writing {output_file}: {shown}")
 
 
 def _escape_net_name(name: Optional[str]) -> Optional[str]:

@@ -103,6 +103,10 @@ def find_relocation_candidate(pcb_data: PCBData, config: GridRouteConfig,
     for v in pcb_data.vias:
         if v.net_id not in plane_ids or id(v) in excl:
             continue
+        if getattr(v, 'locked', False):
+            continue
+        if any(getattr(s, 'locked', False) for s in _attached_stub(pcb_data, v)):
+            continue
         d = math.hypot(v.x - ex, v.y - ey)
         if d < best_d:
             best, best_d = v, d
@@ -124,6 +128,8 @@ def relocate_tap(pcb_data: PCBData, config: GridRouteConfig,
     if old_data is None or working_obstacles is None:
         return None
     stubs = _attached_stub(pcb_data, via)
+    if getattr(via, 'locked', False) or any(getattr(s, 'locked', False) for s in stubs):
+        return None
 
     remove_net_obstacles_from_cache(working_obstacles, old_data)
     pcb_data.vias = [v for v in pcb_data.vias if id(v) != id(via)]

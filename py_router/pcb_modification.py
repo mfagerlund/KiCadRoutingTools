@@ -1787,6 +1787,10 @@ def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
             # connectivity in the pruner) instead of offering it as a candidate.
             anchor = [s for s in net_segs if id(s) not in routed_seg_ids]
             net_segs = [s for s in net_segs if id(s) in routed_seg_ids]
+        locked_anchor = [s for s in net_segs if getattr(s, 'locked', False)]
+        if locked_anchor:
+            anchor = list(anchor) + [s for s in locked_anchor if s not in anchor]
+            net_segs = [s for s in net_segs if not getattr(s, 'locked', False)]
         if _protected:
             # #672: the exemption keeps every landing site; a sub-cell
             # sliver is not one. Everything else on this net stays.
@@ -1813,6 +1817,10 @@ def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
         if g:
             kept = list(kept) + g
             removed = [x for x in removed if not getattr(x, 'graphic', False)]
+        locked_removed = [x for x in removed if getattr(x, 'locked', False)]
+        if locked_removed:
+            kept = list(kept) + locked_removed
+            removed = [x for x in removed if not getattr(x, 'locked', False)]
         kept_segs_by_net[net_id] = kept
         for s in removed:
             if id(s) in routed_seg_ids:
@@ -1844,6 +1852,8 @@ def sweep_dead_ends(results, pcb_data: PCBData, scope_net_ids=None,
         for r in results:
             for v in r.get('new_vias') or []:
                 if v.net_id != net_id or id(v) in removed_via_ids:
+                    continue
+                if getattr(v, 'locked', False):
                     continue
                 # PHYSICAL-attach test, not endpoint coincidence (#320): a
                 # segment lands on a via when its endpoint is inside the via
@@ -2891,6 +2901,9 @@ def remove_orphan_islands(results, pcb_data: PCBData, scope_net_ids=None,
             _cv_gfx = [v for j, v in enumerate(net_vias)
                        if via_reprs.get(j) is not None
                        and uf.find(via_reprs[j]) == root]
+            if any(getattr(s, 'locked', False) for s in segs) or any(
+                    getattr(v, 'locked', False) for v in _cv_gfx):
+                continue  # KiCad-locked copper is user-owned, not debris
             if net_graphics and _touches_graphic(segs, _cv_gfx):
                 continue  # copper abutting input art (#337): physically joined
             if keep_input_copper and (
@@ -2986,6 +2999,7 @@ def trim_dangles_past_body_anchor(results, pcb_data: PCBData, scope_net_ids=None
         # input segments are read-only too: they anchor (all_net_segs feeds
         # every model) but are never split-trimmed.
         net_segs = [s for s in all_net_segs if not getattr(s, 'graphic', False)
+                    and not getattr(s, 'locked', False)
                     and not (keep_input_copper and id(s) not in routed_seg_ids)]
         if not net_segs:
             continue
@@ -3407,6 +3421,8 @@ def _prune_net_cycles(net_id: int, net_segs: List[Segment], net_vias, net_pads,
     safe_removed = []
     for s in sorted(removed, key=lambda s: (not grazes(s),
                     -math.hypot(s.end_x - s.start_x, s.end_y - s.start_y))):
+        if getattr(s, 'locked', False):
+            continue  # user-pinned copper is never a cycle-prune candidate
         if protected_ids and id(s) in protected_ids:
             continue  # read-only input copper: a loop through it stays closed
         trial = [x for x in cur if x is not s]
@@ -3748,6 +3764,8 @@ def weld_redundant_grazing_detours(results, pcb_data: PCBData, scope_net_ids=Non
             if len(inc) != 2 or Bxy in via_pts or Bxy in pad_pts:
                 continue
             (s1, e1), (s2, e2) = inc
+            if getattr(s1, 'locked', False) or getattr(s2, 'locked', False):
+                continue
             if s1 is s2 or s1.layer != s2.layer:
                 continue
             if id(s1) not in routed_seg_ids or id(s2) not in routed_seg_ids:
@@ -3776,6 +3794,8 @@ def weld_redundant_grazing_detours(results, pcb_data: PCBData, scope_net_ids=Non
 
             def try_weld(keepxy, movexy):
                 movers = [(s, end) for (s, end) in touch.get(movexy, []) if s is not s1 and s is not s2]
+                if any(getattr(s, 'locked', False) for (s, _) in movers):
+                    return None
                 if not movers or any(id(s) not in routed_seg_ids for (s, _) in movers):
                     return None  # nothing to move, or would mutate an ORIGINAL seg in place
                 snap = [(s, s.start_x, s.start_y, s.end_x, s.end_y) for (s, _) in movers]
@@ -4099,7 +4119,8 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
     nets_pruned = 0
     for net_id, net_segs in segs_by_net.items():
         grazing = [s for s in net_segs
-                   if (not keep_input_copper or id(s) in routed_seg_ids)
+                   if not getattr(s, 'locked', False)
+                   and (not keep_input_copper or id(s) in routed_seg_ids)
                    and grazes(s)]
         if not grazing:
             continue
@@ -4508,7 +4529,8 @@ def nudge_grazing_octolinear(results, pcb_data: PCBData, scope_net_ids=None,
     # re-bent too. The connectivity check is run WITH the net's pour.
     for net_id, net_segs in segs_by_net.items():
         grazing = [s for s in net_segs
-                   if (not keep_input_copper or id(s) in routed_seg_result)
+                   if not getattr(s, 'locked', False)
+                   and (not keep_input_copper or id(s) in routed_seg_result)
                    and grazes(s)]
         if not grazing:
             continue
@@ -4964,6 +4986,7 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
 
             candidates = [s for s in net_segs
                           if not getattr(s, 'graphic', False)
+                          and not getattr(s, 'locked', False)
                           and (not keep_input_copper or id(s) in routed_seg_result)
                           and math.hypot(s.end_x - s.start_x, s.end_y - s.start_y) > 1e-6]
             if len(candidates) < 2:
@@ -6181,8 +6204,9 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
         # static during the pass.
         for _round in range(MAX_ROUNDS):
             grazing = [s for s in net_segs
-                       if (not keep_input_copper or id(s) in routed_seg_result
-                           or id(s) in added_ids)
+                       if not getattr(s, 'locked', False)
+                       and (not keep_input_copper or id(s) in routed_seg_result
+                            or id(s) in added_ids)
                        and grazes(s)]
             offenders = [(s, _seg_worst_offender(pcb_data, net_id, s, eff_clr(net_id),
                                                  net_clearances=net_clearances,
@@ -6210,6 +6234,8 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
                     incident = [g for g in net_segs
                                 if vk(g.start_x, g.start_y) == vk(px, py)
                                 or vk(g.end_x, g.end_y) == vk(px, py)]
+                    if any(getattr(g, 'locked', False) for g in incident):
+                        return  # a vertex move would rewrite locked copper
                     if any(g.layer != s.layer for g in incident):
                         return  # cross-layer joint without a recorded via: leave it
                     if keep_input_copper and any(
@@ -6684,6 +6710,7 @@ def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
             own_ids.add(id(v))
     scoped = [v for v in pcb_data.vias
               if id(v) in own_ids
+              and not getattr(v, 'locked', False)
               and (scope_net_ids is None or v.net_id in scope_net_ids)]
     for v in scoped:
         if not (copper_flagged(v) or hole_flagged(v) or npth_copper_flagged(v)
