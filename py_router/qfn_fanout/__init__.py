@@ -331,7 +331,7 @@ def run_output_conflict(vx, vy, net_id, placed, px=None, py=None, *,
 def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                          track_width, clearance, via_size, via_drill, grid_step,
                          allow_via_in_pad=False, board_edge_clearance=0.0,
-                         progress_callback=None):
+                         progress_callback=None, same_net_pad_clearance=0.0):
     """Via-drop escape (issue #164): instead of a surface 45-degree fan, run a
     short stub from each pad to a through-via just past the pad edge and let
     signal routing pick the net up on an inner/back layer. This escapes a
@@ -624,6 +624,13 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                 return False
         for pad in foreign_pads:
             if pad.net_id == net_id:            # own net (incl. via-in-pad) is fine
+                # #581: an active same-net pad via clearance keeps the via that far off every
+                # same-net SMD pad (an open via beside a pad wicks solder), not only out of it.
+                if (same_net_pad_clearance > 0
+                        and not (pad.drill and pad.drill > 0)
+                        and _seg_hits_pad(vx, vy, vx, vy, pad,
+                                          margin=via_size / 2 + same_net_pad_clearance - 1e-6)):
+                    return False
                 continue
             # Rotation-exact rectangle clearance (the disc test over-rejected an
             # elongated neighbour pad a pitch away). The via is through-all-layers,
@@ -1219,7 +1226,8 @@ def generate_qfn_fanout(footprint: Footprint,
                                     track_width, clearance, via_size, via_drill, grid_step,
                                     allow_via_in_pad=allow_via_in_pad,
                                     board_edge_clearance=board_edge_clearance,
-                                    progress_callback=progress_callback)
+                                    progress_callback=progress_callback,
+                                    same_net_pad_clearance=same_net_pad_clearance or 0.0)
 
     # Build stubs
     stubs: List[FanoutStub] = []
