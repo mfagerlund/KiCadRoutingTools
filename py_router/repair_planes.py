@@ -3639,6 +3639,8 @@ def _write_output(input_file: str, output_file: str, segments: List[Dict], vias:
     assert_balanced_sexpr(new_content, label=output_file)
     with open(output_file, 'w', encoding='utf-8') as f:
         f.write(new_content)
+    from kicad_writer import assert_locked_copper_preserved
+    assert_locked_copper_preserved(input_file, output_file)
 
 
 def main():

@@ -130,6 +130,8 @@ def relocate_tap(pcb_data: PCBData, config: GridRouteConfig,
     if old_data is None or working_obstacles is None:
         return None
     stubs = _attached_stub(pcb_data, via)
+    if is_immutable_copper(via) or any(is_immutable_copper(s) for s in stubs):
+        return None     # a caller handing a locked tap directly: never moved
 
     remove_net_obstacles_from_cache(working_obstacles, old_data)
     pcb_data.vias = [v for v in pcb_data.vias if id(v) != id(via)]

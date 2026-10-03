@@ -19,7 +19,7 @@ from kicad_writer import (
     swap_via_nets_at_positions, swap_pad_nets_in_content, modify_segment_layers,
     move_copper_text_to_silkscreen, move_copper_graphics_to_silkscreen,
     add_teardrops_to_pads, remove_segments_from_content,
-    strip_zero_length_edge_cuts)
+    strip_zero_length_edge_cuts, assert_locked_copper_preserved)
 from connectivity import find_connected_segment_positions
 
 
@@ -219,6 +219,8 @@ def write_routed_output(
 
     with open(output_file, 'w', encoding='utf-8') as f:
         f.write(new_content)
+
+    assert_locked_copper_preserved(input_file, output_file)
 
     print(f"Successfully wrote {output_file}")
     return True

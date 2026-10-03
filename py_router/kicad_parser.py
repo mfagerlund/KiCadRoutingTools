@@ -8657,12 +8657,12 @@ def pcbnew_track_copper(board, to_mm=None, get_layer_name=None, owners=None):
             # stderr line per via and then fell through to the same answer:
             # 34 of the 99 sets-21-27 boards logged 70-90 lines of it, in the
             # same stream as warnings that matter. GetFrontWidth() is the
-            # stable outer-annulus accessor; GetWidth stays as the fallback
-            # for builds that lack it.
+            # stable outer-annulus accessor; layer-qualified GetWidth stays
+            # as the fallback for builds that lack it.
             try:
                 _vw = track.GetFrontWidth()
             except Exception:
-                _vw = track.GetWidth()
+                _vw = track.GetWidth(track.TopLayer())
             v = Via(
                 x=to_mm(track.GetPosition().x),
                 y=to_mm(track.GetPosition().y),
