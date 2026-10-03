@@ -56,6 +56,11 @@ def get_stub_info(pcb_data: PCBData, net_id: int, stub_x: float, stub_y: float,
     segments = get_stub_segments(pcb_data, net_id, stub_x, stub_y, stub_layer, tolerance)
     if not segments:
         return None
+    if any(getattr(s, 'locked', False) for s in segments):
+        # KiCad-locked copper (a locked supply pre-route) is pinned to its layer just as it is
+        # protected from rip-up (#521): relayering it moved full-width outer-layer trunks onto
+        # thinner inner copper. A stub that contains locked copper is not a swap candidate.
+        return None
 
     # Find the pad this stub connects to
     net_pads = pcb_data.pads_by_net.get(net_id, [])
@@ -221,7 +226,7 @@ def apply_stub_layer_switch(pcb_data: PCBData, stub: StubInfo, new_layer: str,
             # from the original file on their ORIGINAL layer, so relayering one
             # here only corrupts the in-memory obstacle model (#583).
             continue
-        if id(seg) in segments_to_switch:
+        if id(seg) in segments_to_switch or getattr(seg, 'locked', False):
             continue
         # Check if segment connects to pad position
         if (abs(seg.start_x - stub.pad_x) < tolerance and abs(seg.start_y - stub.pad_y) < tolerance) or \
@@ -234,6 +239,11 @@ def apply_stub_layer_switch(pcb_data: PCBData, stub: StubInfo, new_layer: str,
     for seg in pcb_data.segments:
         if id(seg) in segments_to_switch and seg not in all_segments:
             all_segments.append(seg)
+    if any(getattr(seg, 'locked', False) for seg in all_segments):
+        # Defence for callers that build StubInfo themselves: locked copper never moves layer.
+        if debug:
+            print(f"      apply_stub_layer_switch: net={stub.net_id} stub holds locked copper; not switched")
+        return [], []
 
     if debug:
         print(f"      apply_stub_layer_switch: net={stub.net_id}, from {stub.layer} to {new_layer}")
