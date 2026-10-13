@@ -1267,6 +1267,9 @@ def repair_planes(
                 net_clearances=net_clearances,
                 layer_costs=(list(layer_costs) if layer_costs else None),  # #658 finalize sub-runs honor chain layer economics
                 hole_to_hole_clearance=hole_to_hole_clearance,
+                # Seance C306/R312/U301: forward the resolved #581 clearance; the
+                # sub-route's own auto-read finds no record beside the mid-run input.
+                same_net_pad_clearance=config.same_net_pad_clearance,
                 return_results=True, pcb_data=pcb_data,
                 # #540 item 2: price the OTHER pending casualties' corridors
                 # (this batch's own nets excluded -- theirs to reclaim).
@@ -1876,6 +1879,9 @@ def repair_planes(
                     net_clearances=net_clearances,
                     layer_costs=(list(layer_costs) if layer_costs else None),  # #658 finalize sub-runs honor chain layer economics
                     hole_to_hole_clearance=hole_to_hole_clearance,
+                    # Seance C306/R312/U301: forward the resolved #581 clearance; the
+                    # sub-route's own auto-read finds no record beside the mid-run input.
+                    same_net_pad_clearance=config.same_net_pad_clearance,
                     # #527: forward progress/cancel -- a multi-net reconnect
                     # used to run minutes behind one static message.
                     progress_callback=(
@@ -2490,6 +2496,9 @@ def repair_planes(
                     # zynq2's residual drill grazes -- same forwarding-gap
                     # class 8920cb0 fixed for the two reconnect calls).
                     hole_to_hole_clearance=hole_to_hole_clearance,
+                    # Seance C306/R312/U301: forward the resolved #581 clearance; the
+                    # sub-route's own auto-read finds no record beside the mid-run input.
+                    same_net_pad_clearance=config.same_net_pad_clearance,
                     # #527: forward progress/cancel into the region-join
                     # sub-route (it can A* for minutes on a big pour).
                     progress_callback=(
