@@ -137,6 +137,12 @@ def _compute_stale_input_copper(orig_by_net, scope_ids, final_copper,
 
     ``full_sig`` distinguishes a superseded item from a kept one; ``pos_sig`` is
     the coarser locus a replacement lands on (via drill hole / segment span).
+
+    A LOCKED original is never stale: locked input copper ships verbatim (the
+    writer's assert_locked_copper_preserved tripwire). When a reroute re-emits
+    its exact locus -- e.g. the sub-grid pad-centre-to-grid stub a later edge
+    leaves the same off-grid pad by -- the EMITTED twin is the redundant copy;
+    ``drop_locked_twins`` takes it out of the write-list.
     """
     final = {}
     if final_ids is None:
@@ -150,11 +156,47 @@ def _compute_stale_input_copper(orig_by_net, scope_ids, final_copper,
         nfinal = final.get(nid, ())
         nemit = emit.get(nid, ())
         for c in orig_by_net.get(nid, []):
+            if getattr(c, 'locked', False):
+                continue
             on_board = (id(c) in final_ids) if final_ids is not None \
                 else (full_sig(c) in nfinal)
             if not on_board or pos_sig(c) in nemit:
                 stale.append(c)
     return stale
+
+
+def drop_locked_twins(results, orig_seg_by_net, orig_via_by_net, extra_vias=None):
+    """Remove from the write-list every emitted segment/via that lands on the
+    exact locus (segment span+layer, via hole) of a LOCKED original of the
+    same net: the locked original ships verbatim, so the emitted copy would
+    only stack on it (#284 twin of the locked-copper contract). ``extra_vias``
+    (the stub layer-swap via list) is filtered in place too. Returns
+    (segments dropped, vias dropped)."""
+    seg_locus = {(nid, _seg_span_sig(s)) for nid, segs in orig_seg_by_net.items()
+                 for s in segs if getattr(s, 'locked', False)}
+    via_locus = {(nid, _via_pos_sig(v)) for nid, vias in orig_via_by_net.items()
+                 for v in vias if getattr(v, 'locked', False)}
+    ns = nv = 0
+    if not seg_locus and not via_locus:
+        return ns, nv
+    for r in results:
+        segs = r.get('new_segments')
+        if segs and seg_locus:
+            keep = [s for s in segs if (s.net_id, _seg_span_sig(s)) not in seg_locus]
+            ns += len(segs) - len(keep)
+            if len(keep) != len(segs):
+                r['new_segments'] = keep
+        vias = r.get('new_vias')
+        if vias and via_locus:
+            keep = [v for v in vias if (v.net_id, _via_pos_sig(v)) not in via_locus]
+            nv += len(vias) - len(keep)
+            if len(keep) != len(vias):
+                r['new_vias'] = keep
+    if extra_vias and via_locus:
+        keep = [v for v in extra_vias if (v.net_id, _via_pos_sig(v)) not in via_locus]
+        nv += len(extra_vias) - len(keep)
+        extra_vias[:] = keep
+    return ns, nv
 
 
 def _via_full_sig(v):
@@ -3393,6 +3435,14 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # The strip references the FROZEN committed board (_committed_segments,
     # snapshotted by the pipeline's freeze hook), never live pcb_data: a
     # cleanup pass's removals must not masquerade as rip signals (B1).
+    # A LOCKED original ships verbatim; a re-emitted copy on its exact locus is
+    # the redundant one (the sub-grid pad stub a later edge of the same net
+    # reproduces), so it leaves the write-list before the stale computation.
+    _lt_s, _lt_v = drop_locked_twins(results, _orig_seg_by_net, _orig_via_by_net,
+                                     extra_vias=all_swap_vias)
+    if _lt_s or _lt_v:
+        print(f"Dropped {_lt_s} segment(s) and {_lt_v} via(s) re-emitted on locked "
+              f"input copper from the write-list (#284)")
     _emitted_segs = [_s for _r in results for _s in (_r.get('new_segments') or [])]
     _stale_input_segs = compute_stale_input_segments(
         _orig_seg_by_net, sweep_scope_ids, _committed_segments, _emitted_segs,
