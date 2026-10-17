@@ -127,7 +127,8 @@ def to_axis_aligned_frame(pcb_data: PCBData, ref: str
     cx, cy, theta, fwd, back = _frame_of(fp)
     ortho = is_orthogonal(theta)
 
-    rp = copy.deepcopy(pcb_data)
+    from bga_fanout.flip_frame import frame_copy
+    rp = frame_copy(pcb_data)
     rp.frame_rotation = theta     # a memo keyed on the board FILE must see another board
 
     seen_pads = set()

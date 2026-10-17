@@ -248,6 +248,30 @@ def test_flip_hints_turns_a_full_move(results):
         for (ha, hb, hL), (a, b, L) in zip(home['legs'], hint['legs'])))
 
 
+def test_turned_copy_with_rescue_maps(results):
+    """The post-route rescue caches native GridObstacleMaps on the board
+    (net_rescue._rescue_map_cache); turning that board over used to fail
+    ("cannot pickle 'builtins.GridObstacleMap' object"), so every fanout
+    rescue of a back-side BGA was lost (Changeling B U901, 2026-10-17)."""
+    from collections import OrderedDict
+    from grid_router import GridObstacleMap
+    from bga_fanout import rotate_frame as rf
+    pcb = _fixture('B')
+    pcb._rescue_map_cache = OrderedDict(k=(GridObstacleMap(2), None, None))
+    try:
+        turned, _back = ff.to_front_frame(pcb, 'U1')
+        rotated = rf.to_axis_aligned_frame(pcb, "U1")[0]
+        error = ''
+    except Exception as e:
+        turned = rotated = None
+        error = str(e)
+    _ok(results, 'a board with cached rescue maps turns over and rotates', turned is not None, error)
+    if turned is not None:
+        _ok(results, 'the copies start with empty rescue caches',
+            not turned._rescue_map_cache and not rotated._rescue_map_cache)
+        _ok(results, 'the real board keeps its cache', list(pcb._rescue_map_cache) == ['k'])
+
+
 def main():
     results = []
     print('to_front_frame on real boards')
@@ -256,6 +280,8 @@ def main():
     test_symmetry_on_synthetic_bga(results)
     print('a full hint turned over, legs included')
     test_flip_hints_turns_a_full_move(results)
+    print('a board carrying rescue maps')
+    test_turned_copy_with_rescue_maps(results)
     n_ok = sum(1 for _, ok in results if ok)
     print('=' * 60)
     print(f'{n_ok}/{len(results)} flip-frame tests passed')

@@ -77,6 +77,19 @@ def mirror_axis(pcb_data: PCBData) -> float:
     return round(c / AXIS_LATTICE) * AXIS_LATTICE
 
 
+def frame_copy(pcb_data: PCBData) -> PCBData:
+    """Deep copy of the board for a turned or rotated frame, with an empty
+    rescue map cache: the cache holds native GridObstacleMaps, which cannot
+    be copied ("cannot pickle 'builtins.GridObstacleMap' object" lost every
+    post-route fanout rescue on a back-side BGA), and a map built for the
+    real board is wrong for the turned one anyway."""
+    memo = {}
+    cache = getattr(pcb_data, '_rescue_map_cache', None)
+    if cache is not None:
+        memo[id(cache)] = type(cache)()
+    return copy.deepcopy(pcb_data, memo)
+
+
 def to_front_frame(pcb_data: PCBData, ref: str, axis: float = None
                    ) -> Tuple[PCBData, Callable[[float, float], Point]]:
     """Return (turned_pcb, back). `turned_pcb` is a deep copy of the board
@@ -92,7 +105,7 @@ def to_front_frame(pcb_data: PCBData, ref: str, axis: float = None
     def m(x, y):
         return (x, 2.0 * CY - y)
 
-    rp = copy.deepcopy(pcb_data)
+    rp = frame_copy(pcb_data)
     # the turned copy says so: a memo keyed on the board FILE (path,
     # mtime, size) would otherwise hand the turned board the real one's
     # model -- measured: the braid's obstacle memo gave the turned
