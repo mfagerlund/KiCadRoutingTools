@@ -1643,7 +1643,13 @@ def _underpad_via_escape(footprint, pcb_data, pad_infos, layout, layer,
                         pair_clearance=_pc if _priced else None):
                 return (_rvx, _rvy)
         for d in candidate_offsets(pi.pad_width, mode):
-            vx, vy = snap(px + ex * d), snap(py + ey * d)
+            # Snap only along the escape axis. Across it the via stays on the
+            # pad's centre line: a 0.5 mm pitch row off the grid (pads at
+            # ...856 on a 0.1 grid) otherwise lands every via 0.044 mm toward
+            # a neighbour pad, which on a 0.3 mm pad at 0.12 clearance eats
+            # the whole slack and drops the pad. A diagonal escape snaps both.
+            vx = snap(px + ex * d) if ex else px
+            vy = snap(py + ey * d) if ey else py
             stub_ok = (stub_layer_idx is None or
                        _om.line_clear(px, py, vx, vy, stub_layer, _ocfg))
             if stub_ok \
