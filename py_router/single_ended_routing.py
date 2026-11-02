@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import env_knobs
 import math
+import operator
 import time
 import numpy as np
 from contextlib import contextmanager
@@ -352,6 +353,9 @@ def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
     return min(best, best_custom)
 
 
+_LAYER_OF = operator.attrgetter('layer')  # the #803 digest's layer tuple, built in C (same tuple, same hash)
+
+
 def _foreign_seg_arrays(pcb_data, layer):
     """Cached per-layer numpy arrays (net_id, x1, y1, x2, y2, half_width) for every
     routed SEGMENT on `layer`, plus every VIA folded in as a degenerate (zero-length)
@@ -390,7 +394,7 @@ def _foreign_seg_arrays(pcb_data, layer):
     # call pays the #803 digest as before.
     if not getattr(pcb_data, '_foreign_seg_arr_trust', False):
         sig = sig + (sum(map(id, segs)), sum(map(id, vias)),
-                     hash(tuple(sg.layer for sg in segs)))
+                     hash(tuple(map(_LAYER_OF, segs))))
     cache = getattr(pcb_data, '_foreign_seg_arr_cache', None)
     if cache is None or cache[0] != sig:
         cache = (sig, {})
@@ -458,7 +462,7 @@ def _cached_own_pad_nets(pcb_data):
     return out
 
 
-def _foreign_seg_exempt(pcb_data, layer, net_id, n_rows):
+def _foreign_seg_exempt(pcb_data, layer, net_id, n_rows, _validated=False):
     """Boolean mask of foreign-array rows that are NOT foreign to `net_id`.
 
     #908: a footprint's own copper carries no net, so it is foreign to every
@@ -468,8 +472,12 @@ def _foreign_seg_exempt(pcb_data, layer, net_id, n_rows):
     same exemption for the geometric terminal-graze / short gate, which reads
     copper directly rather than the map. Foreign nets are untouched: a row is
     exempt only for the nets its own footprint's pads put on it.
+    `_validated`: the caller has just called _foreign_seg_arrays for this layer
+    with no copper change since, so the cache is current (skips a second #803
+    digest, which is O(segments)).
     """
-    _foreign_seg_arrays(pcb_data, layer)
+    if not _validated:
+        _foreign_seg_arrays(pcb_data, layer)
     per_layer = pcb_data._foreign_seg_arr_cache[1]
     key = (layer, 'exempt', net_id)
     hit = per_layer.get(key)
@@ -484,11 +492,12 @@ def _foreign_seg_exempt(pcb_data, layer, net_id, n_rows):
     return mask
 
 
-def _foreign_seg_bboxes(pcb_data, layer):
+def _foreign_seg_bboxes(pcb_data, layer, _validated=False):
     """(min_x, max_x, min_y, max_y) arrays of the foreign segments+vias
     on `layer`, built with -- and valid exactly as long as -- the arrays
-    of _foreign_seg_arrays."""
-    _foreign_seg_arrays(pcb_data, layer)
+    of _foreign_seg_arrays. `_validated`: see _foreign_seg_exempt."""
+    if not _validated:
+        _foreign_seg_arrays(pcb_data, layer)
     return pcb_data._foreign_seg_arr_cache[1][(layer, 'bbox')]
 
 
@@ -519,10 +528,12 @@ def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
         return 1e9
     n = max(2, int(math.hypot(x2 - x1, y2 - y1) / 0.02) + 1)
     R = _FOREIGN_PAD_WINDOW
-    fminx, fmaxx, fminy, fmaxy = _foreign_seg_bboxes(pcb_data, layer)
+    # the arrays were validated just above, with no copper change since: one
+    # #803 digest per call, not three (it was most of this function's cost)
+    fminx, fmaxx, fminy, fmaxy = _foreign_seg_bboxes(pcb_data, layer, _validated=True)
     near = ((fmaxx >= min(x1, x2) - R) & (fminx <= max(x1, x2) + R) &
             (fmaxy >= min(y1, y2) - R) & (fminy <= max(y1, y2) + R) & (nid != net_id))
-    near &= ~_foreign_seg_exempt(pcb_data, layer, net_id, nid.size)
+    near &= ~_foreign_seg_exempt(pcb_data, layer, net_id, nid.size, _validated=True)
     if not near.any():
         return 1e9
     ax, ay, bx, by, hw = fax[near], fay[near], fbx[near], fby[near], fhw[near]
