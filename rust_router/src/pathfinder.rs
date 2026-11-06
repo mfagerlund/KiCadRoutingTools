@@ -88,6 +88,8 @@ impl PartialOrd for Open {
     fn partial_cmp(&self, o: &Self) -> Option<Ordering> { Some(self.cmp(o)) }
 }
 
+const PRES_MAX: f32 = 1000.0;
+
 #[pyclass]
 pub struct NegotiatedRouter {
     base: GridObstacleMap,
@@ -122,6 +124,8 @@ pub struct NegotiatedRouter {
     max_iters: u32,
     threads: usize,
     time_limit_s: f64,
+    defer_legalise: bool,
+    stop_file: Option<String>, // stop (as on the time limit) once this file exists
     max_expansions: u64,
     chunk: usize, // >0: fixed-size chunks routed together (Jacobi inside a chunk); 0: disjoint-window batches
     log: Vec<String>,
@@ -545,8 +549,10 @@ impl NegotiatedRouter {
             max_iters: 60,
             threads: 0,
             time_limit_s: 600.0,
+            stop_file: None,
+            defer_legalise: false,
             max_expansions: 20_000_000,
-            chunk: 32,
+            chunk: 16,
             log: Vec::new(),
         })
     }
@@ -613,11 +619,15 @@ impl NegotiatedRouter {
 
     #[pyo3(signature = (via_cost=None, turn_cost=None, r_tt=None, r_tv=None, r_vv=None, pres0=None, pres_mult=None,
                         hist_fac=None, h_weight=None, margin=None, max_iters=None, threads=None, time_limit_s=None,
-                        max_expansions=None, chunk=None))]
+                        max_expansions=None, chunk=None, stop_file=None,
+                        defer_legalise=None))]
     pub fn set_params(&mut self, via_cost: Option<f32>, turn_cost: Option<f32>, r_tt: Option<f32>, r_tv: Option<f32>,
                       r_vv: Option<f32>, pres0: Option<f32>, pres_mult: Option<f32>, hist_fac: Option<f32>,
                       h_weight: Option<f32>, margin: Option<i32>, max_iters: Option<u32>, threads: Option<usize>,
-                      time_limit_s: Option<f64>, max_expansions: Option<u64>, chunk: Option<usize>) {
+                      time_limit_s: Option<f64>, max_expansions: Option<u64>, chunk: Option<usize>,
+                      stop_file: Option<String>, defer_legalise: Option<bool>) {
+        if let Some(v) = defer_legalise { self.defer_legalise = v; }
+        if let Some(v) = stop_file { self.stop_file = if v.is_empty() { None } else { Some(v) }; }
         if let Some(v) = chunk { self.chunk = v; }
         if let Some(v) = via_cost { self.via_cost = v; }
         if let Some(v) = turn_cost { self.turn_cost = v; }
@@ -660,15 +670,27 @@ impl NegotiatedRouter {
         let mut stopped = "converged";
         loop {
             iters += 1;
+            let mut resolved = 0usize;
             let it_t = Instant::now();
             let batches: Vec<Vec<usize>> = if self.chunk > 0 {
+                // nets in one chunk do not see each other: a fresh (seeded) order every pass, so two nets that
+                // collide are not routed blind to each other again and again
+                if iters > 1 {
+                    let mut s: u64 = 0x9E3779B97F4A7C15 ^ (iters as u64).wrapping_mul(0xBF58476D1CE4E5B9);
+                    for i in (1..todo.len()).rev() {
+                        s ^= s << 13;
+                        s ^= s >> 7;
+                        s ^= s << 17;
+                        todo.swap(i, (s % (i as u64 + 1)) as usize);
+                    }
+                }
                 todo.chunks(self.chunk).map(|c| c.to_vec()).collect()
             } else {
                 self.batches(&todo)
             };
             let nb = batches.len();
             for batch in batches {
-                if t0.elapsed().as_secs_f64() > self.time_limit_s {
+                if self.out_of_time(&t0) {
                     break;
                 }
                 let batch_t = Instant::now();
@@ -690,10 +712,25 @@ impl NegotiatedRouter {
                 if bt > 2.0 {
                     eprintln!("  negotiated pass {iters}: batch of {} nets took {bt:.1} s", batch.len());
                 }
+                // Searches ran against the state before the chunk; commit in order, and a route that the chunk-mates
+                // committed before it now cross is searched again against them (Gauss-Seidel correction), so two
+                // conflicting nets in one chunk do not swap the same corridor pass after pass.
+                let seen: Vec<usize> = found.iter()
+                    .map(|(_, p, _)| p.as_ref().map_or(0, |paths| self.foreign_hits(paths))).collect();
                 let mut retry = Vec::new();
-                for (ni, p, e) in found {
+                for ((ni, p, e), c0) in found.into_iter().zip(seen) {
                     total_exp += e;
                     searches += 1;
+                    let p = match p {
+                        Some(paths) if self.foreign_hits(&paths) > c0 => {
+                            let (p2, e2) = py.allow_threads(|| self.route_net(ni, pres));
+                            total_exp += e2;
+                            searches += 1;
+                            resolved += 1;
+                            p2
+                        }
+                        other => other,
+                    };
                     match p {
                         Some(paths) => {
                             let r = self.paint(&paths, &dt, &dtv, &dvv);
@@ -747,7 +784,7 @@ impl NegotiatedRouter {
             }
             let routed = self.routes.iter().filter(|r| r.is_some()).count();
             let line = format!(
-                "pass {iters}: {} nets in {nb} batches, {routed}/{n} routed, {} unroutable, {} conflicted nets ({ncells} cells), pres {pres:.2}, {:.2} s",
+                "pass {iters}: {} nets in {nb} batches, {routed}/{n} routed, {} unroutable, {} conflicted nets ({ncells} cells), {resolved} re-searched, pres {pres:.2}, {:.2} s",
                 todo.len(), self.unroutable.iter().filter(|&&u| u).count(), conflicted.len(), it_t.elapsed().as_secs_f64());
             eprintln!("  negotiated {line}");
             self.log.push(line);
@@ -758,16 +795,76 @@ impl NegotiatedRouter {
                 stopped = "pass limit";
                 break;
             }
-            if t0.elapsed().as_secs_f64() > self.time_limit_s {
+            if self.out_of_time(&t0) {
                 stopped = "time limit";
                 break;
             }
             let _ = last_conflicts;
             last_conflicts = ncells;
-            pres *= self.pres_mult;
+            pres = (pres * self.pres_mult).min(PRES_MAX);  // history carries on past the cap
             todo = conflicted;
         }
-        // legalize: drop the most conflicted net until no conflict remains
+        // legalize: drop the most conflicted net until no conflict remains (KRT_NEGOTIATED_DUMP defers it)
+        let dropped = if self.defer_legalise { Vec::new() } else { self.legalise_inner() };
+        let d = PyDict::new(py);
+        d.set_item("passes", iters)?;
+        d.set_item("stopped", stopped)?;
+        d.set_item("seconds", t0.elapsed().as_secs_f64())?;
+        d.set_item("expansions", total_exp)?;
+        d.set_item("searches", searches)?;
+        d.set_item("routed", self.routes.iter().filter(|r| r.is_some()).count())?;
+        d.set_item("unroutable", self.nets.iter().zip(&self.unroutable).filter(|(_, &u)| u).map(|(n, _)| n.net_id).collect::<Vec<_>>())?;
+        d.set_item("dropped", dropped)?;
+        d.set_item("log", self.log.clone())?;
+        Ok(d)
+    }
+
+    /// The routed paths of net index i (each a list of (gx, gy, layer)); None when it has no legal route.
+    pub fn paths(&self, i: usize) -> Option<Vec<Vec<(i32, i32, u8)>>> {
+        self.routes.get(i).and_then(|r| r.as_ref().map(|r| r.paths.clone()))
+    }
+
+    pub fn net_count(&self) -> usize { self.nets.len() }
+
+    /// Drop the most conflicted nets until the rest is legal (after run() with defer_legalise); their net ids.
+    pub fn legalise(&mut self) -> Vec<i64> { self.legalise_inner() }
+
+    /// Net index i's conflicting cells now: track centreline cells (x, y, layer) inside a foreign keep-out, via
+    /// cells (x, y) inside a foreign via keep-out (diagnosis).
+    pub fn conflict_cells(&self, i: usize) -> (Vec<(i32, i32, u8)>, Vec<(i32, i32)>) {
+        let r = match self.routes.get(i).and_then(|r| r.as_ref()) { Some(r) => r, None => return (vec![], vec![]) };
+        let (ct, cv) = self.conflicts(r);
+        let plane = self.plane();
+        let w = self.w as usize;
+        let xy = |c: usize| (self.x0 + (c % w) as i32, self.y0 + (c / w) as i32);
+        (ct.into_iter().map(|k| { let (x, y) = xy(k % plane); (x, y, (k / plane) as u8) }).collect(),
+         cv.into_iter().map(xy).collect())
+    }
+}
+
+impl NegotiatedRouter {
+    /// Cells of an unpainted route inside another net's keep-out now: track centreline cells with any occupancy,
+    /// via cells with any via occupancy on some layer.
+    fn foreign_hits(&self, paths: &[Vec<(i32, i32, u8)>]) -> usize {
+        let plane = self.plane();
+        let mut k = 0;
+        for p in paths {
+            for (i, &(x, y, l)) in p.iter().enumerate() {
+                let c = match self.cell(x, y) { Some(c) => c, None => continue };
+                if self.occ_t[l as usize * plane + c] > 0 {
+                    k += 1;
+                }
+                if i + 1 < p.len() && p[i + 1].0 == x && p[i + 1].1 == y && p[i + 1].2 != l
+                    && (0..self.nl).any(|ll| self.occ_v[ll * plane + c] > 0) {
+                    k += 1;
+                }
+            }
+        }
+        k
+    }
+
+    fn legalise_inner(&mut self) -> Vec<i64> {
+        let n = self.nets.len();
         let mut dropped = Vec::new();
         loop {
             let mut worst: Option<(usize, usize)> = None;
@@ -789,23 +886,11 @@ impl NegotiatedRouter {
                 }
             }
         }
-        let d = PyDict::new(py);
-        d.set_item("passes", iters)?;
-        d.set_item("stopped", stopped)?;
-        d.set_item("seconds", t0.elapsed().as_secs_f64())?;
-        d.set_item("expansions", total_exp)?;
-        d.set_item("searches", searches)?;
-        d.set_item("routed", self.routes.iter().filter(|r| r.is_some()).count())?;
-        d.set_item("unroutable", self.nets.iter().zip(&self.unroutable).filter(|(_, &u)| u).map(|(n, _)| n.net_id).collect::<Vec<_>>())?;
-        d.set_item("dropped", dropped)?;
-        d.set_item("log", self.log.clone())?;
-        Ok(d)
+        dropped
     }
 
-    /// The routed paths of net index i (each a list of (gx, gy, layer)); None when it has no legal route.
-    pub fn paths(&self, i: usize) -> Option<Vec<Vec<(i32, i32, u8)>>> {
-        self.routes.get(i).and_then(|r| r.as_ref().map(|r| r.paths.clone()))
+    fn out_of_time(&self, t0: &Instant) -> bool {
+        t0.elapsed().as_secs_f64() > self.time_limit_s
+            || self.stop_file.as_ref().map_or(false, |p| std::path::Path::new(p).exists())
     }
-
-    pub fn net_count(&self) -> usize { self.nets.len() }
 }
