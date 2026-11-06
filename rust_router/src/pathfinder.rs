@@ -88,8 +88,6 @@ impl PartialOrd for Open {
     fn partial_cmp(&self, o: &Self) -> Option<Ordering> { Some(self.cmp(o)) }
 }
 
-const PRES_MAX: f32 = 1000.0;
-
 #[pyclass]
 pub struct NegotiatedRouter {
     base: GridObstacleMap,
@@ -125,6 +123,7 @@ pub struct NegotiatedRouter {
     threads: usize,
     time_limit_s: f64,
     defer_legalise: bool,
+    pres_max: f32, // present-cost cap; history carries on past it
     stop_file: Option<String>, // stop (as on the time limit) once this file exists
     max_expansions: u64,
     chunk: usize, // >0: fixed-size chunks routed together (Jacobi inside a chunk); 0: disjoint-window batches
@@ -551,6 +550,7 @@ impl NegotiatedRouter {
             time_limit_s: 600.0,
             stop_file: None,
             defer_legalise: false,
+            pres_max: 30.0,
             max_expansions: 20_000_000,
             chunk: 16,
             log: Vec::new(),
@@ -620,12 +620,14 @@ impl NegotiatedRouter {
     #[pyo3(signature = (via_cost=None, turn_cost=None, r_tt=None, r_tv=None, r_vv=None, pres0=None, pres_mult=None,
                         hist_fac=None, h_weight=None, margin=None, max_iters=None, threads=None, time_limit_s=None,
                         max_expansions=None, chunk=None, stop_file=None,
-                        defer_legalise=None))]
+                        defer_legalise=None, pres_max=None))]
     pub fn set_params(&mut self, via_cost: Option<f32>, turn_cost: Option<f32>, r_tt: Option<f32>, r_tv: Option<f32>,
                       r_vv: Option<f32>, pres0: Option<f32>, pres_mult: Option<f32>, hist_fac: Option<f32>,
                       h_weight: Option<f32>, margin: Option<i32>, max_iters: Option<u32>, threads: Option<usize>,
                       time_limit_s: Option<f64>, max_expansions: Option<u64>, chunk: Option<usize>,
-                      stop_file: Option<String>, defer_legalise: Option<bool>) {
+                      stop_file: Option<String>, defer_legalise: Option<bool>,
+                      pres_max: Option<f32>) {
+        if let Some(v) = pres_max { self.pres_max = v; }
         if let Some(v) = defer_legalise { self.defer_legalise = v; }
         if let Some(v) = stop_file { self.stop_file = if v.is_empty() { None } else { Some(v) }; }
         if let Some(v) = chunk { self.chunk = v; }
@@ -821,7 +823,7 @@ impl NegotiatedRouter {
             }
             let _ = last_conflicts;
             last_conflicts = ncells;
-            pres = (pres * self.pres_mult).min(PRES_MAX);  // history carries on past the cap
+            pres = (pres * self.pres_mult).min(self.pres_max);  // history carries on past the cap
             todo = conflicted;
         }
         // legalize: drop the most conflicted net until no conflict remains (KRT_NEGOTIATED_DUMP defers it)
