@@ -2722,15 +2722,18 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
 
     # Route single-ended nets. KRT_NEGOTIATED=1: negotiated-congestion pass first (py_router/negotiated.py);
     # the nets it leaves go to the sequential loop.
+    # single_ended_nets stays the whole scope (escalation, protection, coverage, the final re-grade); only the
+    # sequential loop gets the negotiated pass's leftovers.
     import negotiated as _negotiated
+    _sequential_nets = single_ended_nets
     if _negotiated.enabled() and single_ended_nets:
-        _n_ok, single_ended_nets, _n_time = _negotiated.route_negotiated(state, single_ended_nets, cancel_check)
+        _n_ok, _sequential_nets, _n_time = _negotiated.route_negotiated(state, single_ended_nets, cancel_check)
         if os.environ.get('KRT_NEGOTIATED_NO_FALLBACK'):   # measurement: the negotiated pass alone
-            single_ended_nets = []
+            _sequential_nets = []
         successful += _n_ok
         total_time += _n_time
     se_successful, se_failed, se_time, se_iterations, route_index, user_quit = route_single_ended_nets(
-        state, single_ended_nets,
+        state, _sequential_nets,
         route_index_start=route_index,
         cancel_check=cancel_check, progress_callback=progress_callback
     )
