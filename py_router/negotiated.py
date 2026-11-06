@@ -10,7 +10,11 @@ copper.
 
 Knobs (environment): KRT_NEGOTIATED_THREADS (default: all cores), KRT_NEGOTIATED_PASSES (60),
 KRT_NEGOTIATED_SECONDS (time limit of the negotiation, default 600; a stop file stops it too),
-KRT_NEGOTIATED_MARGIN_MM (search window margin around a net's terminals, 6 mm).
+KRT_NEGOTIATED_MARGIN_MM (search window margin around a net's terminals, 6 mm), KRT_NEGOTIATED_CHUNK (nets searched
+together, 16), KRT_NEGOTIATED_MAX_TERMINALS (nets with more terminals go to the sequential loop, 32),
+KRT_NEGOTIATED_HWEIGHT (A* heuristic weight; config.heuristic_weight), KRT_NEGOTIATED_PRES0 / _PRES_MULT / _HIST
+(PathFinder present-cost start and growth, history increment), KRT_NEGOTIATED_NO_FALLBACK (diagnosis: nothing goes
+to the sequential loop).
 """
 import os
 import time
@@ -178,13 +182,14 @@ def route_negotiated(state, single_ended_nets: List[Tuple[str, int]], cancel_che
                            np.ascontiguousarray(vias, dtype=np.int32))
 
     picked, rest, origs = [], [], []
+    max_terms = _env_num('KRT_NEGOTIATED_MAX_TERMINALS', 32, int)
     for name, nid in single_ended_nets:
         if nid in olinks:
             rest.append((name, nid))
             continue
         terms = net_terminals(pcb_data, nid, config, coord, layer_map)
-        if not terms:
-            rest.append((name, nid))
+        if not terms or len(terms) > max_terms:
+            rest.append((name, nid))  # a plane-like tree (hundreds of pads) is cheaper net by net, after the rest
             continue
         router.add_net(int(nid), int(nid), [t[0] for t in terms])
         orig = {}
@@ -208,7 +213,7 @@ def route_negotiated(state, single_ended_nets: List[Tuple[str, int]], cancel_che
         threads=_env_num('KRT_NEGOTIATED_THREADS', 0, int),
         time_limit_s=seconds,
         pres0=_env_num('KRT_NEGOTIATED_PRES0', 0.5), pres_mult=_env_num('KRT_NEGOTIATED_PRES_MULT', 1.8),
-        hist_fac=_env_num('KRT_NEGOTIATED_HIST', 0.3), h_weight=_env_num('KRT_NEGOTIATED_HWEIGHT', 1.0),
+        hist_fac=_env_num('KRT_NEGOTIATED_HIST', 0.3), h_weight=_env_num('KRT_NEGOTIATED_HWEIGHT', float(config.heuristic_weight)),
         chunk=_env_num('KRT_NEGOTIATED_CHUNK', 16, int), stop_file=stop or '')
     print(f"\nNegotiated main pass: {len(picked)} nets ({len(rest)} left to the sequential loop), "
           f"grid {w}x{h}x{len(layer_names)}")

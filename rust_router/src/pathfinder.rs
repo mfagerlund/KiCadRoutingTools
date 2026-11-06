@@ -671,6 +671,7 @@ impl NegotiatedRouter {
         loop {
             iters += 1;
             let mut resolved = 0usize;
+            let mut cut = false; // the time limit or the stop file cut this pass short
             let it_t = Instant::now();
             let batches: Vec<Vec<usize>> = if self.chunk > 0 {
                 // nets in one chunk do not see each other: a fresh (seeded) order every pass, so two nets that
@@ -691,6 +692,7 @@ impl NegotiatedRouter {
             let nb = batches.len();
             for batch in batches {
                 if self.out_of_time(&t0) {
+                    cut = true;
                     break;
                 }
                 let batch_t = Instant::now();
@@ -699,52 +701,66 @@ impl NegotiatedRouter {
                         self.unpaint(&r);
                     }
                 }
-                let me: &Self = self;
-                let found: Vec<(usize, Option<Vec<Vec<(i32, i32, u8)>>>, u64)> = py.allow_threads(|| {
-                    pool.install(|| {
-                        batch.par_iter().map(|&ni| {
-                            let (p, e) = me.route_net(ni, pres);
-                            (ni, p, e)
-                        }).collect()
-                    })
-                });
-                let bt = batch_t.elapsed().as_secs_f64();
-                if bt > 2.0 {
-                    eprintln!("  negotiated pass {iters}: batch of {} nets took {bt:.1} s", batch.len());
-                }
-                // Searches ran against the state before the chunk; commit in order, and a route that the chunk-mates
-                // committed before it now cross is searched again against them (Gauss-Seidel correction), so two
-                // conflicting nets in one chunk do not swap the same corridor pass after pass.
-                let seen: Vec<usize> = found.iter()
-                    .map(|(_, p, _)| p.as_ref().map_or(0, |paths| self.foreign_hits(paths))).collect();
+                // Searches run in parallel against the state before the round; results commit in order, and a route
+                // that chunk-mates committed earlier in the round now cross goes to the next round, searched again
+                // (in parallel with the other stale ones) against them. The first result of a round always commits,
+                // so rounds end; two conflicting nets in one chunk no longer swap the same corridor pass after pass.
                 let mut retry = Vec::new();
-                for ((ni, p, e), c0) in found.into_iter().zip(seen) {
-                    total_exp += e;
-                    searches += 1;
-                    let p = match p {
-                        Some(paths) if self.foreign_hits(&paths) > c0 => {
-                            let (p2, e2) = py.allow_threads(|| self.route_net(ni, pres));
-                            total_exp += e2;
-                            searches += 1;
-                            resolved += 1;
-                            p2
+                let mut round: Vec<usize> = batch.clone();
+                let mut first_round = true;
+                while !round.is_empty() {
+                    let me: &Self = self;
+                    let timed: Vec<(usize, Option<Vec<Vec<(i32, i32, u8)>>>, u64, usize, f64)> = py.allow_threads(|| {
+                        pool.install(|| {
+                            round.par_iter().map(|&ni| {
+                                let st = Instant::now();
+                                let (p, e) = me.route_net(ni, pres);
+                                let c0 = p.as_ref().map_or(0, |paths| me.foreign_hits(paths));
+                                (ni, p, e, c0, st.elapsed().as_secs_f64())
+                            }).collect()
+                        })
+                    });
+                    for (ni, _, e, _, s) in &timed {
+                        if *s > 5.0 {
+                            let net = &self.nets[*ni];
+                            eprintln!("  negotiated pass {iters}: net {} ({} terminals, window {}) took {s:.1} s, {e} expansions",
+                                      net.net_id, net.terminals.len(), if net.full { "full" } else { "bbox" });
                         }
-                        other => other,
-                    };
-                    match p {
-                        Some(paths) => {
-                            let r = self.paint(&paths, &dt, &dtv, &dvv);
-                            self.routes[ni] = Some(r);
-                        }
-                        None => {
-                            if !self.nets[ni].full {
-                                self.nets[ni].full = true;
-                                retry.push(ni);
-                            } else {
-                                self.unroutable[ni] = true;
+                    }
+                    let found: Vec<(usize, Option<Vec<Vec<(i32, i32, u8)>>>, u64, usize)> =
+                        timed.into_iter().map(|(a, b, c, d, _)| (a, b, c, d)).collect();
+                    if !first_round {
+                        resolved += round.len();
+                    }
+                    first_round = false;
+                    let mut stale = Vec::new();
+                    for (k, (ni, p, e, c0)) in found.into_iter().enumerate() {
+                        total_exp += e;
+                        searches += 1;
+                        match p {
+                            Some(paths) => {
+                                if k > 0 && self.foreign_hits(&paths) > c0 {
+                                    stale.push(ni);
+                                    continue;
+                                }
+                                let r = self.paint(&paths, &dt, &dtv, &dvv);
+                                self.routes[ni] = Some(r);
+                            }
+                            None => {
+                                if !self.nets[ni].full {
+                                    self.nets[ni].full = true;
+                                    retry.push(ni);
+                                } else {
+                                    self.unroutable[ni] = true;
+                                }
                             }
                         }
                     }
+                    round = stale;
+                }
+                let bt = batch_t.elapsed().as_secs_f64();
+                if bt > 2.0 {
+                    eprintln!("  negotiated pass {iters}: batch of {} nets took {bt:.1} s", batch.len());
                 }
                 // a window failure retries once on the whole grid (alone: its window overlaps everything)
                 for ni in retry {
@@ -788,6 +804,10 @@ impl NegotiatedRouter {
                 todo.len(), self.unroutable.iter().filter(|&&u| u).count(), conflicted.len(), it_t.elapsed().as_secs_f64());
             eprintln!("  negotiated {line}");
             self.log.push(line);
+            if cut {
+                stopped = "time limit";
+                break;
+            }
             if conflicted.is_empty() {
                 break;
             }
