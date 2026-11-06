@@ -16,7 +16,8 @@ KRT_NEGOTIATED_HWEIGHT (A* heuristic weight; config.heuristic_weight), KRT_NEGOT
 / _PRES_MAX
 (PathFinder present-cost start, growth and cap, history increment), KRT_NEGOTIATED_ASYNC=1 (a work queue instead
 of chunked rounds: each search commits once checked against the commits made since it began; not deterministic),
-KRT_NEGOTIATED_NO_FALLBACK (diagnosis: nothing goes to the sequential loop).
+KRT_NEGOTIATED_MIN_NETS (40: smaller sets, and every call after the first in a process, go straight to the
+sequential loop), KRT_NEGOTIATED_NO_FALLBACK (diagnosis: nothing goes to the sequential loop).
 """
 import os
 import time
@@ -41,6 +42,19 @@ from routing_utils import build_layer_map
 
 def enabled() -> bool:
     return os.environ.get('KRT_NEGOTIATED', '') not in ('', '0')
+
+
+_RAN = [False]
+
+
+def wanted(n_nets: int) -> bool:
+    """Whether this batch_route call gets the negotiated pass: KRT_NEGOTIATED set, the first call in this process,
+    and at least KRT_NEGOTIATED_MIN_NETS (40) nets. Rescue rounds re-enter batch_route with a handful of hard nets;
+    there the negotiation only repeats the sequential loop's work (cm5io: 7 calls, 144 s, 7 nets)."""
+    if not enabled() or _RAN[0] or n_nets < _env_num('KRT_NEGOTIATED_MIN_NETS', 40, int):
+        return False
+    _RAN[0] = True
+    return True
 
 
 def _env_num(name, default, kind=float):

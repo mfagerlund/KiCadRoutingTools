@@ -2726,7 +2726,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # sequential loop gets the negotiated pass's leftovers.
     import negotiated as _negotiated
     _sequential_nets = single_ended_nets
-    if _negotiated.enabled() and single_ended_nets:
+    if single_ended_nets and _negotiated.wanted(len(single_ended_nets)):
         _n_ok, _sequential_nets, _n_time = _negotiated.route_negotiated(state, single_ended_nets, cancel_check)
         if os.environ.get('KRT_NEGOTIATED_NO_FALLBACK'):   # measurement: the negotiated pass alone
             _sequential_nets = []
