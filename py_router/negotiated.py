@@ -165,10 +165,46 @@ def register_success(state, net_id, result):
         add_net_obstacles_from_cache(state.working_obstacles, cache[net_id])
 
 
+
+class _ElapsedTee:
+    """stdout unchanged, plus a copy of every line stamped with wall-clock seconds since the tee began."""
+
+    def __init__(self, inner, path):
+        self.inner, self.f, self.t0, self.bol = inner, open(path, 'a', encoding='utf-8'), time.time(), True
+
+    def write(self, s):
+        self.inner.write(s)
+        for part in s.splitlines(True):
+            if self.bol:
+                self.f.write(f'{time.time() - self.t0:8.1f} ')
+            self.f.write(part)
+            self.bol = part.endswith('\n')
+        self.f.flush()
+        return len(s)
+
+    def flush(self):
+        self.inner.flush()
+
+    def __getattr__(self, name):
+        return getattr(self.inner, name)
+
+
+def _install_elapsed_tee():
+    """By default (KRT_NEGOTIATED_ELAPSED_LOG=0 turns it off): copy stdout, stamped, to krt-elapsed.log beside the output board (where the time
+    goes after the negotiation; the route log itself is unchanged)."""
+    import sys
+    if os.environ.get('KRT_NEGOTIATED_ELAPSED_LOG', '1') in ('', '0') or isinstance(sys.stdout, _ElapsedTee):
+        return
+    outs = [a for a in sys.argv if a.endswith('.kicad_pcb')]
+    if outs:
+        sys.stdout = _ElapsedTee(sys.stdout, os.path.join(os.path.dirname(os.path.abspath(outs[-1])), 'krt-elapsed.log'))
+
+
 def route_negotiated(state, single_ended_nets: List[Tuple[str, int]], cancel_check=None):
     """Route single_ended_nets by negotiated congestion. Returns (successful, rest, seconds): rest are the
     (name, id) the sequential loop still has to route."""
     t0 = time.time()
+    _install_elapsed_tee()
     pcb_data, config = state.pcb_data, state.config
     coord = GridCoord(config.grid_step)
     layer_map = build_layer_map(config.layers)
