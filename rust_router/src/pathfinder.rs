@@ -26,6 +26,8 @@ use numpy::PyReadonlyArray2;
 use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
+use std::sync::atomic::{AtomicU16, Ordering as AO};
+use std::sync::Mutex;
 use std::time::Instant;
 
 use crate::obstacle_map::GridObstacleMap;
@@ -101,13 +103,10 @@ pub struct NegotiatedRouter {
     nets: Vec<Net>,
     routes: Vec<Option<Route>>,
     unroutable: Vec<bool>,
-    occ_t: Vec<u16>,
-    occ_v: Vec<u16>,
+    occ_t: Vec<AtomicU16>,
+    occ_v: Vec<AtomicU16>,
     hist_t: Vec<f32>,
     hist_v: Vec<f32>,
-    stamp_t: Vec<u32>,
-    stamp_v: Vec<u32>,
-    gen: u32,
     // parameters (cells / cost units: one orthogonal cell = 1.0)
     via_cost: f32,
     turn_cost: f32,
@@ -123,6 +122,7 @@ pub struct NegotiatedRouter {
     threads: usize,
     time_limit_s: f64,
     defer_legalise: bool,
+    async_mode: bool, // a work queue: each search commits when checked against the commits since it began
     pres_max: f32, // present-cost cap; history carries on past it
     stop_file: Option<String>, // stop (as on the time limit) once this file exists
     max_expansions: u64,
@@ -180,8 +180,13 @@ impl NegotiatedRouter {
 
     /// Steiner-tree search for one net against the current occupancy (its own copper removed). None = no tree.
     fn route_net(&self, ni: usize, pres: f32) -> (Option<Vec<Vec<(i32, i32, u8)>>>, u64) {
+        self.route_net_with(ni, pres, self.nets[ni].full)
+    }
+
+    /// route_net in the net's window (full = false) or on the whole grid (full = true).
+    fn route_net_with(&self, ni: usize, pres: f32, full: bool) -> (Option<Vec<Vec<(i32, i32, u8)>>>, u64) {
         let net = &self.nets[ni];
-        let win = self.window(net);
+        let win = if full { self.grid_win() } else { self.window(net) };
         let (ww, wh) = (win.w() as usize, win.h() as usize);
         let nl = self.nl;
         let wplane = ww * wh;
@@ -231,7 +236,7 @@ impl NegotiatedRouter {
         let plane = self.plane();
         let pres_t = |c: usize, l: u8| -> f32 {
             let k = l as usize * plane + c;
-            (1.0 + self.hist_t[k]) * (1.0 + pres * self.occ_t[k] as f32)
+            (1.0 + self.hist_t[k]) * (1.0 + pres * self.occ_t[k].load(AO::Relaxed) as f32)
         };
 
         for _round in 1..nt {
@@ -320,7 +325,7 @@ impl NegotiatedRouter {
                     if self.via_ok(net.owner, x, y, c) {
                         let mut occ = 0u16;
                         for ll in 0..nl {
-                            occ = occ.max(self.occ_v[ll * plane + c]);
+                            occ = occ.max(self.occ_v[ll * plane + c].load(AO::Relaxed));
                         }
                         let vstep = self.via_cost * (1.0 + self.hist_v[c]) * (1.0 + pres * occ as f32);
                         for l2 in 0..nl as u8 {
@@ -396,26 +401,12 @@ impl NegotiatedRouter {
         v
     }
 
-    /// Paint a route's copper into occ_t / occ_v (union per net); returns the painted cell lists.
-    fn paint(&mut self, paths: &[Vec<(i32, i32, u8)>], dt: &[(i32, i32)], dtv: &[(i32, i32)], dvv: &[(i32, i32)]) -> Route {
-        self.gen = self.gen.wrapping_add(1);
-        if self.gen == 0 {
-            self.stamp_t.iter_mut().for_each(|s| *s = 0);
-            self.stamp_v.iter_mut().for_each(|s| *s = 0);
-            self.gen = 1;
-        }
-        let gen = self.gen;
+    /// Paint a route's copper into occ_t / occ_v (union per net); returns the painted cell lists (sorted).
+    fn paint(&self, paths: &[Vec<(i32, i32, u8)>], dt: &[(i32, i32)], dtv: &[(i32, i32)], dvv: &[(i32, i32)]) -> Route {
         let plane = self.plane();
         let nl = self.nl;
-        let mut pt = Vec::new();
-        let mut pv = Vec::new();
-        let mut mark = |arr: &mut Vec<u16>, stamp: &mut Vec<u32>, out: &mut Vec<u32>, k: usize| {
-            if stamp[k] != gen {
-                stamp[k] = gen;
-                arr[k] = arr[k].saturating_add(1);
-                out.push(k as u32);
-            }
-        };
+        let mut pt: Vec<u32> = Vec::new();
+        let mut pv: Vec<u32> = Vec::new();
         let (x0, y0, w, h) = (self.x0, self.y0, self.w, self.h);
         let cellf = |x: i32, y: i32| -> Option<usize> {
             let dx = x - x0;
@@ -427,43 +418,76 @@ impl NegotiatedRouter {
                 let is_via = k + 1 < p.len() && p[k + 1].0 == x && p[k + 1].1 == y && p[k + 1].2 != l;
                 for &(dx, dy) in dt {
                     if let Some(c) = cellf(x + dx, y + dy) {
-                        mark(&mut self.occ_t, &mut self.stamp_t, &mut pt, l as usize * plane + c);
+                        pt.push((l as usize * plane + c) as u32);
                     }
                 }
                 for &(dx, dy) in dtv {
                     if let Some(c) = cellf(x + dx, y + dy) {
-                        mark(&mut self.occ_v, &mut self.stamp_v, &mut pv, l as usize * plane + c);
+                        pv.push((l as usize * plane + c) as u32);
                     }
                 }
                 if is_via {
                     for ll in 0..nl {
                         for &(dx, dy) in dtv {
                             if let Some(c) = cellf(x + dx, y + dy) {
-                                mark(&mut self.occ_t, &mut self.stamp_t, &mut pt, ll * plane + c);
+                                pt.push((ll * plane + c) as u32);
                             }
                         }
                         for &(dx, dy) in dvv {
                             if let Some(c) = cellf(x + dx, y + dy) {
-                                mark(&mut self.occ_v, &mut self.stamp_v, &mut pv, ll * plane + c);
+                                pv.push((ll * plane + c) as u32);
                             }
                         }
                     }
                 }
             }
         }
+        pt.sort_unstable();
+        pt.dedup();
+        pv.sort_unstable();
+        pv.dedup();
+        for &k in &pt {
+            self.occ_t[k as usize].fetch_add(1, AO::Relaxed);
+        }
+        for &k in &pv {
+            self.occ_v[k as usize].fetch_add(1, AO::Relaxed);
+        }
         Route { paths: paths.to_vec(), painted_t: pt, painted_v: pv }
     }
 
-    fn unpaint(&mut self, r: &Route) {
+    fn unpaint(&self, r: &Route) {
         for &k in &r.painted_t {
-            self.occ_t[k as usize] = self.occ_t[k as usize].saturating_sub(1);
+            self.occ_t[k as usize].fetch_sub(1, AO::Relaxed);
         }
         for &k in &r.painted_v {
-            self.occ_v[k as usize] = self.occ_v[k as usize].saturating_sub(1);
+            self.occ_v[k as usize].fetch_sub(1, AO::Relaxed);
         }
     }
 
-    /// Conflicting cells of a routed net: (track cells k=l*plane+c, via positions c).
+    /// Whether a route (not painted) crosses copper committed in `log` (painted cell lists, sorted).
+    fn hits_since(&self, paths: &[Vec<(i32, i32, u8)>], log: &[(Vec<u32>, Vec<u32>)]) -> bool {
+        if log.is_empty() {
+            return false;
+        }
+        let plane = self.plane();
+        for p in paths {
+            for (i, &(x, y, l)) in p.iter().enumerate() {
+                let c = match self.cell(x, y) { Some(c) => c, None => continue };
+                let k = (l as usize * plane + c) as u32;
+                let via = i + 1 < p.len() && p[i + 1].0 == x && p[i + 1].1 == y && p[i + 1].2 != l;
+                for (et, ev) in log {
+                    if et.binary_search(&k).is_ok() {
+                        return true;
+                    }
+                    if via && (0..self.nl).any(|ll| ev.binary_search(&((ll * plane + c) as u32)).is_ok()) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
     fn conflicts(&self, r: &Route) -> (Vec<usize>, Vec<usize>) {
         let plane = self.plane();
         let mut ct = Vec::new();
@@ -472,12 +496,12 @@ impl NegotiatedRouter {
             for (k, &(x, y, l)) in p.iter().enumerate() {
                 let c = match self.cell(x, y) { Some(c) => c, None => continue };
                 let kt = l as usize * plane + c;
-                if self.occ_t[kt] > 1 {
+                if self.occ_t[kt].load(AO::Relaxed) > 1 {
                     ct.push(kt);
                 }
                 let is_via = k + 1 < p.len() && p[k + 1].0 == x && p[k + 1].1 == y && p[k + 1].2 != l;
                 if is_via {
-                    let over = (0..self.nl).any(|ll| self.occ_v[ll * plane + c] > 1);
+                    let over = (0..self.nl).any(|ll| self.occ_v[ll * plane + c].load(AO::Relaxed) > 1);
                     if over {
                         cv.push(c);
                     }
@@ -528,13 +552,10 @@ impl NegotiatedRouter {
             nets: Vec::new(),
             routes: Vec::new(),
             unroutable: Vec::new(),
-            occ_t: vec![0; plane * nl],
-            occ_v: vec![0; plane * nl],
+            occ_t: (0..plane * nl).map(|_| AtomicU16::new(0)).collect(),
+            occ_v: (0..plane * nl).map(|_| AtomicU16::new(0)).collect(),
             hist_t: vec![0.0; plane * nl],
             hist_v: vec![0.0; plane],
-            stamp_t: vec![0; plane * nl],
-            stamp_v: vec![0; plane * nl],
-            gen: 0,
             via_cost: 50.0,
             turn_cost: 0.3,
             r_tt: 3.0,
@@ -550,6 +571,7 @@ impl NegotiatedRouter {
             time_limit_s: 600.0,
             stop_file: None,
             defer_legalise: false,
+            async_mode: false,
             pres_max: 30.0,
             max_expansions: 20_000_000,
             chunk: 16,
@@ -620,13 +642,14 @@ impl NegotiatedRouter {
     #[pyo3(signature = (via_cost=None, turn_cost=None, r_tt=None, r_tv=None, r_vv=None, pres0=None, pres_mult=None,
                         hist_fac=None, h_weight=None, margin=None, max_iters=None, threads=None, time_limit_s=None,
                         max_expansions=None, chunk=None, stop_file=None,
-                        defer_legalise=None, pres_max=None))]
+                        defer_legalise=None, pres_max=None, async_mode=None))]
     pub fn set_params(&mut self, via_cost: Option<f32>, turn_cost: Option<f32>, r_tt: Option<f32>, r_tv: Option<f32>,
                       r_vv: Option<f32>, pres0: Option<f32>, pres_mult: Option<f32>, hist_fac: Option<f32>,
                       h_weight: Option<f32>, margin: Option<i32>, max_iters: Option<u32>, threads: Option<usize>,
                       time_limit_s: Option<f64>, max_expansions: Option<u64>, chunk: Option<usize>,
                       stop_file: Option<String>, defer_legalise: Option<bool>,
-                      pres_max: Option<f32>) {
+                      pres_max: Option<f32>, async_mode: Option<bool>) {
+        if let Some(v) = async_mode { self.async_mode = v; }
         if let Some(v) = pres_max { self.pres_max = v; }
         if let Some(v) = defer_legalise { self.defer_legalise = v; }
         if let Some(v) = stop_file { self.stop_file = if v.is_empty() { None } else { Some(v) }; }
@@ -675,7 +698,78 @@ impl NegotiatedRouter {
             let mut resolved = 0usize;
             let mut cut = false; // the time limit or the stop file cut this pass short
             let it_t = Instant::now();
-            let batches: Vec<Vec<usize>> = if self.chunk > 0 {
+            if self.async_mode {
+                if iters > 1 {
+                    let mut s: u64 = 0x9E3779B97F4A7C15 ^ (iters as u64).wrapping_mul(0xBF58476D1CE4E5B9);
+                    for i in (1..todo.len()).rev() {
+                        s ^= s << 13;
+                        s ^= s >> 7;
+                        s ^= s << 17;
+                        todo.swap(i, (s % (i as u64 + 1)) as usize);
+                    }
+                }
+                let olds: Vec<(usize, Option<Route>)> = todo.iter().map(|&ni| (ni, self.routes[ni].take())).collect();
+                let log: Mutex<Vec<(Vec<u32>, Vec<u32>)>> = Mutex::new(Vec::new());
+                let me: &Self = self;
+                let (dt_, dtv_, dvv_) = (&dt, &dtv, &dvv);
+                // (net, route, full window used, unroutable, expansions, searches, retries, cut short)
+                let res: Vec<(usize, Option<Route>, bool, bool, u64, u64, usize, bool)> = py.allow_threads(|| {
+                    pool.install(|| {
+                        olds.into_par_iter().map(|(ni, old)| {
+                            let mut full = me.nets[ni].full;
+                            if me.out_of_time(&t0) {
+                                // keep what it had: repaint the old route
+                                let r = old.map(|r| { me.unpaint(&r); me.paint(&r.paths, dt_, dtv_, dvv_) });
+                                return (ni, r, full, false, 0, 0, 0, true);
+                            }
+                            if let Some(r) = &old {
+                                me.unpaint(r);
+                            }
+                            let (mut exp, mut srch, mut retries) = (0u64, 0u64, 0usize);
+                            loop {
+                                let s0 = log.lock().unwrap().len();
+                                let (p, e) = me.route_net_with(ni, pres, full);
+                                exp += e;
+                                srch += 1;
+                                match p {
+                                    None => {
+                                        if !full {
+                                            full = true;
+                                            continue;
+                                        }
+                                        return (ni, None, full, true, exp, srch, retries, false);
+                                    }
+                                    Some(paths) => {
+                                        let mut lg = log.lock().unwrap();
+                                        if retries < 3 && me.hits_since(&paths, &lg[s0..]) {
+                                            drop(lg);
+                                            retries += 1;
+                                            continue;
+                                        }
+                                        let r = me.paint(&paths, dt_, dtv_, dvv_);
+                                        lg.push((r.painted_t.clone(), r.painted_v.clone()));
+                                        return (ni, Some(r), full, false, exp, srch, retries, false);
+                                    }
+                                }
+                            }
+                        }).collect()
+                    })
+                });
+                for (ni, r, full, unr, e, s, rt, short) in res {
+                    total_exp += e;
+                    searches += s;
+                    resolved += rt;
+                    cut |= short;
+                    self.nets[ni].full = full;
+                    if unr {
+                        self.unroutable[ni] = true;
+                    }
+                    self.routes[ni] = r;
+                }
+            }
+            let batches: Vec<Vec<usize>> = if self.async_mode {
+                Vec::new()
+            } else if self.chunk > 0 {
                 // nets in one chunk do not see each other: a fresh (seeded) order every pass, so two nets that
                 // collide are not routed blind to each other again and again
                 if iters > 1 {
@@ -873,11 +967,11 @@ impl NegotiatedRouter {
         for p in paths {
             for (i, &(x, y, l)) in p.iter().enumerate() {
                 let c = match self.cell(x, y) { Some(c) => c, None => continue };
-                if self.occ_t[l as usize * plane + c] > 0 {
+                if self.occ_t[l as usize * plane + c].load(AO::Relaxed) > 0 {
                     k += 1;
                 }
                 if i + 1 < p.len() && p[i + 1].0 == x && p[i + 1].1 == y && p[i + 1].2 != l
-                    && (0..self.nl).any(|ll| self.occ_v[ll * plane + c] > 0) {
+                    && (0..self.nl).any(|ll| self.occ_v[ll * plane + c].load(AO::Relaxed) > 0) {
                     k += 1;
                 }
             }

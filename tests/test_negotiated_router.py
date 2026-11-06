@@ -8,6 +8,7 @@
   D. Determinism: the same nets give the same paths with 1 thread and 8 threads, chunk 1 and chunk 16.
   E. A stop file that exists stops a negotiation that has conflicts (C's) after its first pass ("time limit").
   F. Hard keep-outs: a cell another owner's keep-out covers is never used.
+  G. Async mode (work queue, commit checked against the commits since the search began): A and C hold.
 
 Run with:  python tests/test_negotiated_router.py
 """
@@ -34,13 +35,13 @@ def check(cond, what):
         FAILS.append(what)
 
 
-def router(layers, w=40, h=21, blocked=(), threads=4, chunk=16, stop_file=''):
+def router(layers, w=40, h=21, blocked=(), threads=4, chunk=16, stop_file='', async_mode=False):
     base = grid_router.GridObstacleMap(layers)
     for x, y, l in blocked:
         base.add_blocked_cell(x, y, l)
     r = grid_router.NegotiatedRouter(base, 0, 0, w, h)
     r.set_params(via_cost=4.0, turn_cost=0.3, r_tt=R_TT, r_tv=1.5, r_vv=2.5, margin=3, threads=threads, chunk=chunk,
-                 max_iters=40, time_limit_s=30.0, stop_file=stop_file)
+                 max_iters=40, time_limit_s=30.0, stop_file=stop_file, async_mode=async_mode)
     return r
 
 
@@ -120,6 +121,21 @@ def main():
     s = r.run()
     pa = r.paths(a)
     check(bool(pa) and not any((20, y, 0) in cells(pa) for y in range(15)), 'F a foreign keep-out is never crossed')
+
+    # G: async mode on A and C
+    r = router(2, threads=8, async_mode=True)
+    a = r.add_net(1, 1, [[(2, 6, 0)], [(37, 14, 0)]])
+    b = r.add_net(2, 2, [[(2, 14, 0)], [(37, 6, 0)]])
+    s = r.run()
+    pa, pb = r.paths(a), r.paths(b)
+    check(s['stopped'] == 'converged' and s['routed'] == 2 and bool(pa) and bool(pb) and min_gap(pa, pb) > R_TT,
+          f"G async: crossing pair converged and legal ({s['stopped']}, {s['routed']})")
+    r = router(1, blocked=blocked, threads=8, async_mode=True)
+    ids = [r.add_net(10 + k, 10 + k, [[(2, 4 + 6 * k, 0)], [(37, 4 + 6 * k, 0)]]) for k in range(3)]
+    s = r.run()
+    kept = [r.paths(i) for i in ids if r.paths(i)]
+    legal = all(min_gap(kept[i], kept[j]) > R_TT for i in range(len(kept)) for j in range(i + 1, len(kept)))
+    check(len(kept) == 2 and legal, f"G async: two through the two-lane corridor, legal ({len(kept)} kept)")
 
     print(f'\n{len(FAILS)} failure(s)')
     return 1 if FAILS else 0

@@ -14,8 +14,9 @@ KRT_NEGOTIATED_MARGIN_MM (search window margin around a net's terminals, 6 mm), 
 together, 16), KRT_NEGOTIATED_MAX_TERMINALS (nets with more terminals go to the sequential loop, 32),
 KRT_NEGOTIATED_HWEIGHT (A* heuristic weight; config.heuristic_weight), KRT_NEGOTIATED_PRES0 / _PRES_MULT / _HIST
 / _PRES_MAX
-(PathFinder present-cost start, growth and cap, history increment), KRT_NEGOTIATED_NO_FALLBACK (diagnosis: nothing goes
-to the sequential loop).
+(PathFinder present-cost start, growth and cap, history increment), KRT_NEGOTIATED_ASYNC=1 (a work queue instead
+of chunked rounds: each search commits once checked against the commits made since it began; not deterministic),
+KRT_NEGOTIATED_NO_FALLBACK (diagnosis: nothing goes to the sequential loop).
 """
 import os
 import time
@@ -216,7 +217,8 @@ def route_negotiated(state, single_ended_nets: List[Tuple[str, int]], cancel_che
         pres0=_env_num('KRT_NEGOTIATED_PRES0', 0.5), pres_mult=_env_num('KRT_NEGOTIATED_PRES_MULT', 1.8),
         hist_fac=_env_num('KRT_NEGOTIATED_HIST', 0.3), h_weight=_env_num('KRT_NEGOTIATED_HWEIGHT', float(config.heuristic_weight)),
         chunk=_env_num('KRT_NEGOTIATED_CHUNK', 16, int), stop_file=stop or '',
-        pres_max=_env_num('KRT_NEGOTIATED_PRES_MAX', 30.0))
+        pres_max=_env_num('KRT_NEGOTIATED_PRES_MAX', 30.0),
+        async_mode=os.environ.get('KRT_NEGOTIATED_ASYNC', '') not in ('', '0'))
     print(f"\nNegotiated main pass: {len(picked)} nets ({len(rest)} left to the sequential loop), "
           f"grid {w}x{h}x{len(layer_names)}")
     stats = router.run()
