@@ -218,7 +218,7 @@ def route_negotiated(state, single_ended_nets: List[Tuple[str, int]], cancel_che
         hist_fac=_env_num('KRT_NEGOTIATED_HIST', 0.3), h_weight=_env_num('KRT_NEGOTIATED_HWEIGHT', float(config.heuristic_weight)),
         chunk=_env_num('KRT_NEGOTIATED_CHUNK', 16, int), stop_file=stop or '',
         pres_max=_env_num('KRT_NEGOTIATED_PRES_MAX', 30.0),
-        async_mode=os.environ.get('KRT_NEGOTIATED_ASYNC', '') not in ('', '0'))
+        **({'async_mode': True} if os.environ.get('KRT_NEGOTIATED_ASYNC', '') not in ('', '0') else {}))
     print(f"\nNegotiated main pass: {len(picked)} nets ({len(rest)} left to the sequential loop), "
           f"grid {w}x{h}x{len(layer_names)}")
     stats = router.run()
