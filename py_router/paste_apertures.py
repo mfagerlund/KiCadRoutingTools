@@ -597,15 +597,21 @@ def _memo_sig(objs):
 
 def _memo_get(pcb_data, attr, objs):
     hit = getattr(pcb_data, attr, None)
-    if (hit is None or len(hit[0]) != len(objs)
-            or not all(a is b for a, b in zip(hit[0], objs))):
+    if hit is None or len(hit[0]) != len(objs):
+        return False, None
+    aps, segs, fps = objs
+    if hit[0][0] is not aps or hit[0][2] is not fps:
         return False, None
     sig = _memo_sig(objs)
-    if hit[1] == sig:
+    if hit[0][1] is segs and hit[1] == sig:
         return True, hit[2]
-    # Only the segment COUNT moved: if the graphic copper is the same objects,
-    # the answer still holds. Refresh the cheap key and reuse it.
-    if hit[1][:2] == sig[:2] and hit[1][3] == sig[3] and hit[3] == _graphic_sig(objs[1]):
+    # The segment list moved (a routed track was added, or a pass rebuilt the
+    # list: repair_planes and the cleanup assign pcb_data.segments anew): if the
+    # graphic copper is the same objects, the answer still holds. The entry
+    # keeps holding the list it was built from, so those ids cannot be reused.
+    # scalenode-cm4 (Koppar, 2026-11-07): without this the index was rebuilt
+    # for every via obstacle map, 56% of a 19-minute plane-tap stage.
+    if hit[1][:2] == sig[:2] and hit[1][3] == sig[3] and hit[3] == _graphic_sig(segs):
         try:
             setattr(pcb_data, attr, (hit[0], sig, hit[2], hit[3]))
         except Exception:
