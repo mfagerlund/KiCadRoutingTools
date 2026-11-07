@@ -295,7 +295,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
                   f"board={nb} writelist={nr} strip={ns}")
 
     def _prog(stage):
-        if os.environ.get('KRT_NEGOTIATED'):     # fork: stage marks for krt-elapsed.log (where the time goes)
+        if os.environ.get('KRT_CLEANUP_MARKS', '1') != '0':     # fork: stage marks for the elapsed logs (where the time goes)
             print(f"{label}Cleanup stage: {stage}", flush=True)
         if progress_callback:
             progress_callback(0, 0, f"{label}Cleanup: {stage}...")
