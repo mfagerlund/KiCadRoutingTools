@@ -351,11 +351,14 @@ def route_negotiated(state, single_ended_nets: List[Tuple[str, int]], cancel_che
     picked, rest, origs, terms_of = [], [], [], []
     max_terms = _env_num('KRT_NEGOTIATED_MAX_TERMINALS', 32, int)
     tw = config.track_width
+    t_terms = 0.0
     for name, nid in single_ended_nets:
         if nid in olinks:
             rest.append((name, nid))
             continue
+        t0_terms = time.perf_counter()
         terms = net_terminals(pcb_data, nid, config, coord, layer_map)
+        t_terms += time.perf_counter() - t0_terms
         if not terms or len(terms) > max_terms:
             rest.append((name, nid))  # a plane-like tree (hundreds of pads) is cheaper net by net, after the rest
             continue
@@ -398,7 +401,7 @@ def route_negotiated(state, single_ended_nets: List[Tuple[str, int]], cancel_che
         pres_max=_env_num('KRT_NEGOTIATED_PRES_MAX', 30.0),
         **({'async_mode': True} if os.environ.get('KRT_NEGOTIATED_ASYNC', '') not in ('', '0') else {}))
     print(f"\nNegotiated main pass: {len(picked)} nets ({len(rest)} left to the sequential loop), "
-          f"grid {w}x{h}x{len(layer_names)}")
+          f"grid {w}x{h}x{len(layer_names)}; terminals built in {t_terms:.1f} s")
     stats = router.run()
     for line in stats['log']:
         print(f"  {line}")
@@ -419,6 +422,8 @@ def route_negotiated(state, single_ended_nets: List[Tuple[str, int]], cancel_che
         # the search itself, on the whole grid: how many terminals it joined, whether the expansion cap stopped it,
         # and how close it got to each terminal it never reached (a seal at the terminal reads as a few cells;
         # a wall across the board reads as many)
+        if not os.environ.get('KRT_NEGOTIATED_DEBUG_SEALED'):
+            continue  # the whole-grid diagnosis search costs a full search per net: debugging only
         joined, cap, exp, near = router.fail_report(index[n])
         why = 'expansion cap' if cap else 'search exhausted'
         reach = '; '.join(f"terminal {ti}: nearest reach {d:.1f} cells at ({x},{y},{layer_names[l] if l < len(layer_names) else l})"
