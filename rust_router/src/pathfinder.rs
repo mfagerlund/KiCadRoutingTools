@@ -240,6 +240,39 @@ impl NegotiatedRouter {
         let lidx = |x: i32, y: i32, l: u8| -> usize {
             l as usize * wplane + (y - win.y0) as usize * ww + (x - win.x0) as usize
         };
+        // a wide net (extra > 0): the cells its centreline may not stand on, dilated once per search from the hard
+        // copper and the other owners' cells by its extra-margin disk (step_ok scanned a capsule of the base map and
+        // the disk of owner cells on every expansion: one Revenant power net took 8.5 s for 568k expansions)
+        let plane = self.plane();
+        let wide: Option<Vec<bool>> = if net.ext.is_empty() { None } else {
+            let mut w = vec![false; total];
+            for l in 0..nl {
+                if self.forbidden[l] {
+                    continue;
+                }
+                for y in win.y0..=win.y1 {
+                    for x in win.x0..=win.x1 {
+                        let c = match self.cell(x, y) { Some(c) => c, None => continue };
+                        let o = self.owner_t[l * plane + c];
+                        if self.base.is_blocked_hard(x, y, l) || (o != NONE && o != net.owner) {
+                            for &(dx, dy) in &net.ext {
+                                let (nx, ny) = (x + dx, y + dy);
+                                if win.contains(nx, ny) {
+                                    w[lidx(nx, ny, l as u8)] = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Some(w)
+        };
+        let step_ok = |j: usize, px: i32, py: i32, x: i32, y: i32, l: u8, c: usize| -> bool {
+            match &wide {
+                Some(w) => !w[j] && self.track_ok(net.owner, x, y, l, c),
+                None => self.step_ok(net, px, py, x, y, l, c),
+            }
+        };
         let mut g = vec![f32::INFINITY; total];
         let mut parent = vec![u32::MAX; total];
         let mut dir = vec![255u8; total];
@@ -279,7 +312,6 @@ impl NegotiatedRouter {
             let r = i % wplane;
             (win.x0 + (r % ww) as i32, win.y0 + (r / ww) as i32, l as u8)
         };
-        let plane = self.plane();
         // present cost: the occupancy at the centreline cell; a wide net sees the most occupied cell within its
         // extra margin (its copper reaches that far), so it prices a neighbour's paint at its own width
         let gw = self.w;
@@ -364,7 +396,7 @@ impl NegotiatedRouter {
                         continue;
                     }
                     let c = match self.cell(nx, ny) { Some(c) => c, None => continue };
-                    if !is_term(j) && !tree_mark[j] && !self.step_ok(net, x, y, nx, ny, l, c) {
+                    if !is_term(j) && !tree_mark[j] && !step_ok(j, x, y, nx, ny, l, c) {
                         continue;
                     }
                     let len = if dx != 0 && dy != 0 { 1.41421356 } else { 1.0 };
@@ -400,7 +432,7 @@ impl NegotiatedRouter {
                                 continue;
                             }
                             if !is_term(j) && !tree_mark[j]
-                                && (self.forbidden[l2 as usize] || !self.step_ok(net, x, y, x, y, l2, c)) {
+                                && (self.forbidden[l2 as usize] || !step_ok(j, x, y, x, y, l2, c)) {
                                 continue;
                             }
                             let ng = gc + vstep;
