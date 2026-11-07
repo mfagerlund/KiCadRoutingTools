@@ -68,6 +68,7 @@ struct Net {
     dt: Vec<(i32, i32)>,           // its track paint disk: r_tt + 2 extra (both halves of the surplus width)
     dtv: Vec<(i32, i32)>,          // its via-block paint disk: r_tv + extra
     ext: Vec<(i32, i32)>,          // the extra-margin disk its own centreline must keep clear (empty: none)
+    own_vias: Vec<(i32, i32)>,     // the net's existing vias: new vias keep r_vv from them
 }
 
 #[derive(Clone, Default)]
@@ -207,6 +208,28 @@ impl NegotiatedRouter {
         !self.base.in_bga_zone(x, y) || self.zone_allowed(owner, x, y)
     }
 
+    /// via_ok for `net`. (A terminal-cell exemption from the neighbours' via keep-outs, KRT's endpoint override for
+    /// a via in the pad itself, was tried on 2026-11-07 and dropped: on rev-sip it routed FLASH_CS_N in the
+    /// negotiation and then never converged, four nets dropped at legalisation; a bare BGA pad is the fanout
+    /// stage's job.)
+    #[inline]
+    fn via_ok_net(&self, net: &Net, x: i32, y: i32, c: usize) -> bool {
+        self.via_ok(net.owner, x, y, c)
+    }
+
+    /// Mark the r_vv disk around (x, y) in a window-sized mask, the centre cell left (a via may be reused there).
+    fn mark_via_disk(mask: &mut [bool], win: &Win, ww: usize, dvv: &[(i32, i32)], x: i32, y: i32) {
+        for &(dx, dy) in dvv {
+            if dx == 0 && dy == 0 {
+                continue;
+            }
+            let (nx, ny) = (x + dx, y + dy);
+            if win.contains(nx, ny) {
+                mask[(ny - win.y0) as usize * ww + (nx - win.x0) as usize] = true;
+            }
+        }
+    }
+
     fn grid_win(&self) -> Win {
         Win { x0: self.x0, y0: self.y0, x1: self.x0 + self.w - 1, y1: self.y0 + self.h - 1 }
     }
@@ -231,6 +254,13 @@ impl NegotiatedRouter {
 
     /// route_net in the net's window (full = false) or on the whole grid (full = true).
     fn route_net_with(&self, ni: usize, pres: f32, full: bool) -> (Option<Vec<Vec<(i32, i32, u8)>>>, u64) {
+        let (p, e, _) = self.search_net(ni, pres, full, false);
+        (p, e)
+    }
+
+    /// The Steiner search; `diag` asks for the failure diagnosis (None when a tree was found).
+    fn search_net(&self, ni: usize, pres: f32, full: bool, diag: bool)
+        -> (Option<Vec<Vec<(i32, i32, u8)>>>, u64, Option<(usize, bool, Vec<(usize, f32, i32, i32, u8)>)>) {
         let net = &self.nets[ni];
         let win = if full { self.grid_win() } else { self.window(net) };
         let (ww, wh) = (win.w() as usize, win.h() as usize);
@@ -273,6 +303,11 @@ impl NegotiatedRouter {
                 None => self.step_ok(net, px, py, x, y, l, c),
             }
         };
+        let dvv = Self::disk(self.r_vv);
+        let mut vmask = vec![false; wplane];
+        for &(vx, vy) in &net.own_vias {
+            Self::mark_via_disk(&mut vmask, &win, ww, &dvv, vx, vy);
+        }
         let mut g = vec![f32::INFINITY; total];
         let mut parent = vec![u32::MAX; total];
         let mut dir = vec![255u8; total];
@@ -304,7 +339,7 @@ impl NegotiatedRouter {
             }
         }
         if tree.is_empty() {
-            return (None, 0);
+            return (None, 0, if diag { Some((0, false, Vec::new())) } else { None });
         }
         let mut paths: Vec<Vec<(i32, i32, u8)>> = Vec::new();
         let decode = |i: usize| -> (i32, i32, u8) {
@@ -371,7 +406,8 @@ impl NegotiatedRouter {
                 closed[i] = generation * 2;
                 expansions += 1;
                 if expansions > self.max_expansions {
-                    return (None, expansions);
+                    let d = if diag { Some(self.diagnose(net, &joined, true, &closed, generation, total, &decode)) } else { None };
+                    return (None, expansions, d);
                 }
                 let t = goal[i];
                 if t != 0 && !joined[(t - 1) as usize] {
@@ -414,10 +450,10 @@ impl NegotiatedRouter {
                         heap.push(Open { f: ng + hfun(nx, ny), g: ng, idx: j as u32 });
                     }
                 }
-                // via: through via to every other layer
+                // via: through via to every other layer (not within r_vv of the net's own vias)
                 if nl > 1 {
                     let c = match self.cell(x, y) { Some(c) => c, None => continue };
-                    if self.via_ok(net.owner, x, y, c) {
+                    if self.via_ok_net(net, x, y, c) && !vmask[(y - win.y0) as usize * ww + (x - win.x0) as usize] {
                         let mut occ = 0u16;
                         for ll in 0..nl {
                             occ = occ.max(self.occ_v[ll * plane + c].load(AO::Relaxed));
@@ -448,7 +484,13 @@ impl NegotiatedRouter {
                     }
                 }
             }
-            let end = match found { Some(e) => e, None => return (None, expansions) };
+            let end = match found {
+                Some(e) => e,
+                None => {
+                    let d = if diag { Some(self.diagnose(net, &joined, false, &closed, generation, total, &decode)) } else { None };
+                    return (None, expansions, d);
+                }
+            };
             let ti = (goal[end] - 1) as usize;
             joined[ti] = true;
             // path back to the tree
@@ -475,10 +517,46 @@ impl NegotiatedRouter {
                 }
             }
             if p.len() > 1 {
-                paths.push(p.into_iter().map(decode).collect());
+                let path: Vec<(i32, i32, u8)> = p.into_iter().map(decode).collect();
+                for k in 1..path.len() {
+                    let (a, b) = (path[k - 1], path[k]);
+                    if a.0 == b.0 && a.1 == b.1 && a.2 != b.2 {
+                        Self::mark_via_disk(&mut vmask, &win, ww, &dvv, a.0, a.1);
+                    }
+                }
+                paths.push(path);
             }
         }
-        (Some(paths), expansions)
+        (Some(paths), expansions, None)
+    }
+
+    /// The failure diagnosis of one search: terminals joined, the cap flag, and for every terminal not joined the
+    /// reached cell (closed or opened in this round) nearest to its centre.
+    fn diagnose(&self, net: &Net, joined: &[bool], cap: bool, closed: &[u32], generation: u32, total: usize,
+                decode: &dyn Fn(usize) -> (i32, i32, u8)) -> (usize, bool, Vec<(usize, f32, i32, i32, u8)>) {
+        let mut near = Vec::new();
+        for (ti, &j) in joined.iter().enumerate() {
+            if j {
+                continue;
+            }
+            let (cx, cy, r) = net.centres[ti];
+            let mut best: (f32, i32, i32, u8) = (f32::INFINITY, 0, 0, 0);
+            for i in 0..total {
+                if closed[i] < generation * 2 - 1 {
+                    continue;
+                }
+                let (x, y, l) = decode(i);
+                let dx = (x as f32 - cx).abs();
+                let dy = (y as f32 - cy).abs();
+                let (a, b) = if dx > dy { (dx, dy) } else { (dy, dx) };
+                let d = ((a - b) + 1.41421356 * b - r).max(0.0);
+                if d < best.0 {
+                    best = (d, x, y, l);
+                }
+            }
+            near.push((ti, best.0, best.1, best.2, best.3));
+        }
+        (joined.iter().filter(|&&j| j).count(), cap, near)
     }
 
     fn disk(r: f32) -> Vec<(i32, i32)> {
@@ -704,6 +782,34 @@ impl NegotiatedRouter {
         Ok(())
     }
 
+    /// What net index i's search sees at (x, y), per layer: (track ok, track keep-out owner, hard copper, via ok,
+    /// via keep-out owner, hard via block, in a BGA zone, in the net's allowed window). Owner -1 = none.
+    pub fn cell_report(&self, i: usize, x: i32, y: i32) -> Vec<(bool, i32, bool, bool, i32, bool, bool, bool)> {
+        let net = match self.nets.get(i) { Some(n) => n, None => return vec![] };
+        let c = match self.cell(x, y) { Some(c) => c, None => return vec![] };
+        let plane = self.plane();
+        (0..self.nl).map(|l| {
+            let ot = self.owner_t[l * plane + c];
+            let ov = self.owner_v[c];
+            (self.track_ok(net.owner, x, y, l as u8, c), if ot == NONE { -1 } else { ot },
+             self.base.is_blocked_hard(x, y, l), self.via_ok_net(net, x, y, c), if ov == NONE { -1 } else { ov },
+             self.base.is_via_blocked_hard(x, y), self.base.in_bga_zone(x, y), self.zone_allowed(net.owner, x, y))
+        }).collect()
+    }
+
+    /// Why net index i has no tree: its search on the whole grid, diagnosed. (terminals joined, expansion cap hit,
+    /// expansions, per unreached terminal: (index, nearest reached cell's distance in cells, x, y, layer)).
+    pub fn fail_report(&self, i: usize) -> (usize, bool, u64, Vec<(usize, f32, i32, i32, u8)>) {
+        if i >= self.nets.len() {
+            return (0, false, 0, Vec::new());
+        }
+        let (_, e, d) = self.search_net(i, 0.0, true, true);
+        match d {
+            Some((joined, cap, near)) => (joined, cap, e, near),
+            None => (self.nets[i].terminals.len(), false, e, Vec::new()),
+        }
+    }
+
     /// Diagnosis of net index i: per terminal (cells, cells its track may stand on, cells with a free planar
     /// neighbour or via, cells on a forbidden layer). A terminal with no free neighbour and no via is sealed in.
     pub fn terminal_report(&self, i: usize) -> Vec<(usize, usize, usize, usize)> {
@@ -721,7 +827,7 @@ impl NegotiatedRouter {
                 let planar = !self.forbidden[l as usize] && DIRS.iter().any(|&(dx, dy)| {
                     self.cell(x + dx, y + dy).map_or(false, |cc| self.step_ok(net, x, y, x + dx, y + dy, l, cc))
                 });
-                if planar || self.via_ok(net.owner, x, y, c) {
+                if planar || self.via_ok_net(net, x, y, c) {
                     free += 1;
                 }
             }
@@ -772,8 +878,9 @@ impl NegotiatedRouter {
 
     /// A net to route: its terminals, each a list of (gx, gy, layer) cells; extra = (its track width - the routing
     /// width) / 2 in cells for a wide (power) net. Returns its index.
-    #[pyo3(signature = (net_id, owner, terminals, extra=0.0))]
-    pub fn add_net(&mut self, net_id: i64, owner: i32, terminals: Vec<Vec<(i32, i32, u8)>>, extra: f32) -> PyResult<usize> {
+    #[pyo3(signature = (net_id, owner, terminals, extra=0.0, own_vias=None))]
+    pub fn add_net(&mut self, net_id: i64, owner: i32, terminals: Vec<Vec<(i32, i32, u8)>>, extra: f32,
+                   own_vias: Option<Vec<(i32, i32)>>) -> PyResult<usize> {
         // a terminal keeps its first cell (the pad centre) and every other cell the net may stand on
         let terms: Vec<Vec<(i32, i32, u8)>> = terminals.into_iter().map(|t| {
             t.iter().enumerate().filter(|&(k, &(x, y, l))| {
@@ -805,7 +912,8 @@ impl NegotiatedRouter {
             centres.push((cx, cy, r));
         }
         self.nets.push(Net { net_id, owner, terminals: terms, centres, bbox: bb, full: false,
-                             extra: extra.max(0.0), dt: Vec::new(), dtv: Vec::new(), ext: Vec::new() });
+                             extra: extra.max(0.0), dt: Vec::new(), dtv: Vec::new(), ext: Vec::new(),
+                             own_vias: own_vias.unwrap_or_default() });
         self.routes.push(None);
         self.unroutable.push(false);
         Ok(self.nets.len() - 1)

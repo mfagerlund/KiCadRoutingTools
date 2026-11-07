@@ -21,6 +21,7 @@ sequential loop), KRT_NEGOTIATED_NO_FALLBACK (diagnosis: nothing goes to the seq
 """
 import math
 import os
+import types
 import time
 from typing import Dict, List, Tuple
 
@@ -79,7 +80,7 @@ def net_terminals(pcb_data, net_id, config, coord, layer_map):
     """[(cells, {cell: (x, y) original point})] per terminal, or None when the net has no two terminals."""
     tw = config.track_width
     mp = get_multipoint_net_pads(pcb_data, net_id, config)
-    out = []
+    out, rows = [], []  # rows: one pad_info row per terminal (the pin's shape, the pad object or a stand-in sixth)
     if mp:
         for e in mp:
             obj = e[5] if len(e) > 5 else None
@@ -89,6 +90,7 @@ def net_terminals(pcb_data, net_id, config, coord, layer_map):
             else:
                 c = (e[0], e[1], e[2])
                 out.append(([c], {c: (e[3], e[4])}))
+            rows.append(tuple(e))
     else:
         sources, targets, err = get_net_endpoints(pcb_data, net_id, config)
         if not sources or not targets:
@@ -96,8 +98,57 @@ def net_terminals(pcb_data, net_id, config, coord, layer_map):
         for side in (sources, targets):
             cells = [(s[0], s[1], s[2]) for s in side]
             out.append((cells, {(s[0], s[1], s[2]): (s[3], s[4]) for s in side}))
-    out = [t for t in out if t[0]]
+            rows.append(_terminal_row(pcb_data, net_id, config, side[0]))
+    keep = [i for i, t in enumerate(out) if t[0]]
+    out = _join_by_existing_copper(pcb_data, net_id, config, coord, [out[i] for i in keep], [rows[i] for i in keep])
     return out if len(out) >= 2 else None
+
+
+def _terminal_row(pcb_data, net_id, config, s):
+    """A pad_info row for an endpoint row (gx, gy, layer, x, y): the pad at that point when there is one, else a
+    stand-in with the layer name, which the copper join matches to a stub's free end as the pin does."""
+    for pad in pcb_data.pads_by_net.get(net_id, []):
+        if abs(pad.global_x - s[3]) < 1e-3 and abs(pad.global_y - s[4]) < 1e-3:
+            return (s[0], s[1], s[2], s[3], s[4], pad)
+    layer = config.layers[s[2]] if s[2] < len(config.layers) else None
+    return (s[0], s[1], s[2], s[3], s[4], types.SimpleNamespace(layer=layer))
+
+
+def _join_by_existing_copper(pcb_data, net_id, config, coord, terms, rows):
+    """The net's existing copper (fanout dogbones and vias, escape routes, stubs) joins the terminals it connects
+    into one terminal and is part of it, cell by cell on every layer it spans, as the pin's main pass models it
+    ("Existing copper joins N terminals into M groups"; the island cells of its launch surface). A pad under a
+    BGA whose fanout via already leads to an inner layer is then reached through that copper, not through the pad
+    field: with bare pads as terminals ten Revenant nets, every one with a fanout, were unroutable in the negotiation
+    (2026-11-07), the search exhausted inside the SiP's exclusion zone or at a pad no via may sit on."""
+    if os.environ.get('KRT_NEG_NO_COPPER_JOIN'):  # diagnosis knob
+        return terms
+    if not any(s.net_id == net_id for s in pcb_data.segments) and not any(v.net_id == net_id for v in pcb_data.vias):
+        return terms
+    from connectivity import get_terminal_component_info
+    from single_ended_routing import get_all_segment_tap_points
+    comps, _, segs_by, vias_by = get_terminal_component_info(pcb_data, net_id, list(rows))
+    groups = {}
+    for i, t in enumerate(terms):
+        groups.setdefault(comps.get(i, ('lone', i)), []).append(t)
+    out = []
+    for cid, members in groups.items():
+        cells, orig = [], {}
+        for mc, mo in members:
+            for c in mc:
+                if c not in orig:
+                    cells.append(c)
+                    orig[c] = mo.get(c, coord.to_float(c[0], c[1]))
+        if not isinstance(cid, tuple):
+            for p in get_all_segment_tap_points(segs_by.get(cid, []), coord, config.layers, vias=vias_by.get(cid, [])):
+                c = (p[0], p[1], p[2])
+                if c not in orig:
+                    cells.append(c)
+                    orig[c] = (p[3], p[4])
+        out.append((cells, orig))
+    if os.environ.get('KRT_NEGOTIATED_DEBUG_SEALED'):
+        print(f'    copper-join net {net_id}: {[len(c) for c, _ in terms]} terminals -> {[len(c) for c, _ in out]} (segs_by keys {list(segs_by)}, vias_by keys {list(vias_by)}; comps {comps}; segs {sum(len(v) for v in segs_by.values())}, vias {sum(len(v) for v in vias_by.values())})')
+    return out
 
 
 def path_copper(pcb_data, net_id, config, path, orig_of, layer_names, coord, th_positions):
@@ -297,7 +348,7 @@ def route_negotiated(state, single_ended_nets: List[Tuple[str, int]], cancel_che
     forbidden = [c < 0 for c in config.get_layer_costs()]
     router.set_layer_forbidden(forbidden)
 
-    picked, rest, origs = [], [], []
+    picked, rest, origs, terms_of = [], [], [], []
     max_terms = _env_num('KRT_NEGOTIATED_MAX_TERMINALS', 32, int)
     tw = config.track_width
     for name, nid in single_ended_nets:
@@ -316,12 +367,16 @@ def route_negotiated(state, single_ended_nets: List[Tuple[str, int]], cancel_che
             # around the net's own terminals (single_ended_routing allow_radius = 10); without it a fanout via
             # under a SiP/BGA is sealed and the net falls to the sequential loop
             router.add_allowed(int(nid), [(x - 10, y - 10, x + 10, y + 10) for t in terms for (x, y, _) in t[0]])
-        router.add_net(int(nid), int(nid), [t[0] for t in terms], extra=extra)
+        own_vias = sorted({tuple(int(v) for v in coord.to_grid(v.x, v.y)) for v in pcb_data.vias if v.net_id == nid})
+        if os.environ.get('KRT_NEG_NO_OWN_VIAS'):  # diagnosis knob
+            own_vias = []
+        router.add_net(int(nid), int(nid), [t[0] for t in terms], extra=extra, own_vias=own_vias)
         orig = {}
         for _, o in terms:
             orig.update(o)
         picked.append((name, nid))
         origs.append(orig)
+        terms_of.append([t[0] for t in terms])
 
     tw, cl = config.track_width, config.clearance
     vd, dr = config.via_size, config.via_drill
@@ -361,6 +416,30 @@ def route_negotiated(state, single_ended_nets: List[Tuple[str, int]], cancel_che
         rep = router.terminal_report(index[n])
         sealed = sum(1 for t in rep if t[2] == 0)
         print(f"    {names.get(n, n)}: {len(rep)} terminals, {sealed} sealed; " + ' '.join(f"{t[0]}/{t[1]}/{t[2]}/{t[3]}" for t in rep))
+        # the search itself, on the whole grid: how many terminals it joined, whether the expansion cap stopped it,
+        # and how close it got to each terminal it never reached (a seal at the terminal reads as a few cells;
+        # a wall across the board reads as many)
+        joined, cap, exp, near = router.fail_report(index[n])
+        why = 'expansion cap' if cap else 'search exhausted'
+        reach = '; '.join(f"terminal {ti}: nearest reach {d:.1f} cells at ({x},{y},{layer_names[l] if l < len(layer_names) else l})"
+                          for ti, d, x, y, l in near)
+        print(f"      joined {joined} of {len(rep)} terminals, {why} after {exp} expansions on the whole grid" + (f"; {reach}" if reach else ''))
+        if os.environ.get('KRT_NEGOTIATED_DEBUG_SEALED'):
+            # what the search sees at the unreached terminal's first cell and at the nearest reached cell, per layer
+            terms = terms_of[index[n]]
+            for ti, d, x, y, l in near:
+                spots = [('nearest reach', x, y)]
+                if terms and ti < len(terms) and terms[ti]:
+                    tx, ty, _ = terms[ti][0]
+                    spots.insert(0, ('terminal', tx, ty))
+                for what, cx, cy in spots:
+                    rows = router.cell_report(index[n], cx, cy)
+                    desc = ' '.join(f"{layer_names[li] if li < len(layer_names) else li}:"
+                                    f"{'T' if r[0] else 't'}{'' if r[1] < 0 else f'(o{r[1]})'}{'H' if r[2] else ''}"
+                                    f"{'V' if r[3] else 'v'}{'' if r[4] < 0 else f'(o{r[4]})'}{'X' if r[5] else ''}"
+                                    f"{'Z' if r[6] else ''}{'A' if r[7] else ''}" for li, r in enumerate(rows))
+                    print(f"        {what} ({cx},{cy}): {desc}   [T/t track ok/not, (oN) keep-out owner, H hard copper, "
+                          f"V/v via ok/not, X hard via block, Z BGA zone, A allowed window]")
         if os.environ.get('KRT_NEGOTIATED_DEBUG_SEALED'):
             _debug_sealed(state, n, picked, origs, index, coord, layer_names)
 
