@@ -190,12 +190,41 @@ def _custom_pad_min_dist(custom, net_id, pts, base_clearance=None,
     nets (check_drc.point_to_pad_distance -- the model kicad-cli agrees with to
     ~0.1um). Windowed by each pad's bbox + _FOREIGN_PAD_WINDOW; same
     base_clearance local-override and #436 net-class excess adjustments as
-    the vectorized kernels."""
+    the vectorized kernels.
+
+    Vectorised per pad (2026-11-07): every windowed sample point against every
+    polygon edge in one broadcast (the scalar point_to_segment_distance's
+    formula, so the value is the walk's), the even-odd inside test the same
+    way, so the answer is the per-point walk's minimum without visiting the
+    points one by one (the per-sample loop was 11.6 s of the Revenant route
+    stage's 35 s smoothing pass under the profiler: 20k calls, 8.4M abs() and
+    20k polygon walks for eight custom pads). A single point (the point
+    callers) keeps the scalar path: numpy set-up costs more than one walk."""
     if not custom:
         return 1e9
-    from check_drc import point_to_pad_distance
+    from check_drc import point_to_pad_distance, _polys_edge_arrays
     R = _FOREIGN_PAD_WINDOW
     best = 1e9
+    if len(pts) <= 2:
+        for nid, pad in custom:
+            if nid == net_id:
+                continue
+            ex = pad.size_x / 2.0
+            ey = pad.size_y / 2.0
+            adj = 0.0
+            if base_clearance is not None:
+                adj = max((getattr(pad, 'local_clearance', 0.0) or 0.0) - base_clearance, 0.0)
+                if net_clearances:
+                    adj = max(adj, net_clearances.get(nid, base_clearance)
+                              - base_clearance)
+            for (px, py) in pts:
+                if abs(px - pad.global_x) > R + ex or abs(py - pad.global_y) > R + ey:
+                    continue
+                d = point_to_pad_distance(px, py, pad) - adj
+                if d < best:
+                    best = d
+        return best
+    PX = PY = None
     for nid, pad in custom:
         if nid == net_id:
             continue
@@ -207,42 +236,49 @@ def _custom_pad_min_dist(custom, net_id, pts, base_clearance=None,
             if net_clearances:
                 adj = max(adj, net_clearances.get(nid, base_clearance)
                           - base_clearance)
-        # Branch-and-bound prune (exact-result-preserving): the polygons are
-        # stored in GLOBAL coordinates, so the distance from a sample point to
-        # the polygon's bounding BOX is a valid lower bound on its edge
-        # distance (a bbox is tighter than a bounding radius on the elongated
-        # connector/thermal polygons that dominate real boards). Points are
-        # visited lowest-bound first; once the bound can no longer beat
-        # `best`, no later point can either. Cuts the exact polygon walk from
-        # every windowed sample point (the 5mm window is generous) to the few
-        # that matter -- it dominated the #536 smoothing pass.
-        bb = getattr(pad, '_poly_bbox', None)
-        if bb is None:
-            vs = [v for poly in (getattr(pad, 'polygons', None) or ()) for v in poly]
-            if vs:
-                bb = (min(v[0] for v in vs), min(v[1] for v in vs),
-                      max(v[0] for v in vs), max(v[1] for v in vs))
-            else:
-                bb = (pad.global_x - ex, pad.global_y - ey,
-                      pad.global_x + ex, pad.global_y + ey)
-            try:
-                pad._poly_bbox = bb
-            except Exception:
-                pass
-        cand = []
-        for (px, py) in pts:
-            if abs(px - pad.global_x) > R + ex or abs(py - pad.global_y) > R + ey:
+        if PX is None:
+            P = np.asarray(pts, dtype=float).reshape(-1, 2)
+            PX, PY = P[:, 0], P[:, 1]
+        near = (np.abs(PX - pad.global_x) <= R + ex) & (np.abs(PY - pad.global_y) <= R + ey)
+        if not near.any():
+            continue
+        qx, qy = PX[near], PY[near]
+        polys = getattr(pad, 'polygons', None)
+        arrays = _polys_edge_arrays(polys) if polys else None
+        if arrays is None:
+            for px, py in zip(qx, qy):
+                d = point_to_pad_distance(float(px), float(py), pad) - adj
+                if d < best:
+                    best = d
+            continue
+        ex1, ey1, edx, edy, el2 = arrays
+        qx2, qy2 = qx[:, None], qy[:, None]
+        degenerate = (el2 < 1e-10)[None, :]
+        safe = np.where(degenerate, 1.0, el2[None, :])
+        t = ((qx2 - ex1[None, :]) * edx[None, :] + (qy2 - ey1[None, :]) * edy[None, :]) / safe
+        t = np.where(degenerate, 0.0, np.clip(t, 0.0, 1.0))
+        ddx = qx2 - (ex1[None, :] + t * edx[None, :])
+        ddy = qy2 - (ey1[None, :] + t * edy[None, :])
+        d = np.sqrt(ddx * ddx + ddy * ddy).min(axis=1)
+        for poly in polys:
+            if len(poly) == 1:  # the walk measures a one-vertex polygon as a point; the edge arrays skip it
+                d = np.minimum(d, np.sqrt((qx - poly[0][0]) ** 2 + (qy - poly[0][1]) ** 2))
+        # inside any polygon = 0 (check_drc._point_in_poly's even-odd test over the vertex pairs (i, i-1))
+        inside = np.zeros(qx.shape[0], dtype=bool)
+        for poly in polys:
+            Pp = np.asarray(poly, dtype=float)
+            if len(Pp) < 2:
                 continue
-            lo = math.hypot(max(bb[0] - px, px - bb[2], 0.0),
-                            max(bb[1] - py, py - bb[3], 0.0))
-            cand.append((lo, px, py))
-        cand.sort()
-        for lo, px, py in cand:
-            if lo - adj >= best:
-                break
-            d = point_to_pad_distance(px, py, pad) - adj
-            if d < best:
-                best = d
+            xi, yi = Pp[:, 0][None, :], Pp[:, 1][None, :]
+            xj, yj = np.roll(Pp[:, 0], 1)[None, :], np.roll(Pp[:, 1], 1)[None, :]
+            cond = (yi > qy2) != (yj > qy2)
+            with np.errstate(divide='ignore', invalid='ignore'):
+                xint = (xj - xi) * (qy2 - yi) / (yj - yi) + xi
+            inside |= (np.count_nonzero(cond & (qx2 < xint), axis=1) & 1).astype(bool)
+        d = np.where(inside, 0.0, d) - adj
+        m = float(d.min())
+        if m < best:
+            best = m
     return best
 
 
