@@ -440,6 +440,17 @@ def main():
     esp.segments.append(Segment(0, 0, 1, 1, 0.2, 'F.Cu', 0, graphic=True, owner_ref='U2'))
     check('9/S4. adding graphic copper rebuilds it', pa.apertures_by_net(esp) is not idx3)
     del esp.segments[-2:]
+    # change 14: a pass that REBINDS the list (repair_planes, cleanup) keeps the
+    # index while the graphic copper is the same objects; new graphic copper in
+    # the new list still rebuilds it
+    idx4 = pa.apertures_by_net(esp)
+    esp.segments = list(esp.segments) + [Segment(0, 0, 2, 2, 0.2, 'F.Cu', 1)]
+    check('9/S4. a rebuilt segment list with the same graphic copper keeps the index',
+          pa.apertures_by_net(esp) is idx4)
+    esp.segments = list(esp.segments) + [Segment(0, 0, 1, 1, 0.2, 'F.Cu', 0, graphic=True, owner_ref='U2')]
+    check('9/S4. a rebuilt segment list with new graphic copper rebuilds it', pa.apertures_by_net(esp) is not idx4)
+    esp.segments = [sg for sg in esp.segments if not (getattr(sg, 'graphic', False) and sg.owner_ref == 'U2'
+                                                       and sg.end_x == 1)]
     # an EMPTY container still memoises (a fresh [] per call used to miss)
     p_empty = _parse_text(_board(_fp(_pad('1'))))
     p_empty.segments = []
