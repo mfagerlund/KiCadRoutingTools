@@ -160,6 +160,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
                            smooth: bool = False,
                            merge_collinear: bool = True,
                            strict_collapse: bool = True,
+                           cancel_check=None,
                            ) -> CleanupOutcome:
     """Run the post-route cleanup passes in their one canonical order.
 
@@ -244,9 +245,10 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     ``progress_callback(0, 0, "<label>Cleanup: <pass>...")`` fires before
     each pass (#527: the whole pipeline used to run behind whatever message
     the previous phase left on screen -- minutes of apparent hang on dense
-    boards). No cancel hook by design: the passes maintain board/write-list
-    invariants pairwise, and aborting between them ships a half-reconciled
-    ledger.
+    boards). ``cancel_check`` (fork) never aborts between passes: the passes
+    maintain board/write-list invariants pairwise, and aborting between them
+    ships a half-reconciled ledger. A stop request seen at the start skips
+    the cosmetic passes whole; smoothing stops between nets.
 
     Returns a CleanupOutcome; input-file removals from every pass are merged
     into ``input_strip_segments`` in pass order.
@@ -300,6 +302,18 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     def _prog(stage):
         if progress_callback:
             progress_callback(0, 0, f"{label}Cleanup: {stage}...")
+
+    # fork: a stop request (route-board's --budget-s stop file through cancel_check) skips the cosmetic passes,
+    # whole passes only, so the board/write-list ledger stays as consistent as with the passes' own off switches
+    # (the same switches --quick 2 turns off above); the ledger-keeping passes (phantom reconcile, orphan islands,
+    # dead-end sweep, dangle trim, width neck, soft joints, collinear merge) still run. Koppar's stmp157/imx8mp
+    # were killed inside a 300-600 s smoothing after the stop came and returned no board.
+    _stopped = bool(cancel_check is not None and cancel_check())
+    if _stopped:
+        print(f"{label}Cleanup: stop requested, skipping the cosmetic passes (graze prune, re-bend, "
+              f"micro-shift, via nudge, cycle prune, strict collapse, smoothing)", flush=True)
+        graze = octolinear = via_nudge = cycles = smooth = strict_collapse = False
+        counts['stopped'] = 1
 
     _trace('start')
     if snap:
@@ -435,7 +449,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     _prog("graze micro-shift")
     counts['microshifted'] = 0
     _ms_unresolved = set()
-    if not _judge:
+    if not (_judge or _stopped):
         _microshift(scope_net_ids, _ms_unresolved)
 
     if via_nudge:
@@ -586,7 +600,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     if _sm_env == '':
         _sm_on = smooth and not getattr(config, 'guide_corridor_enabled', False)
     else:
-        _sm_on = _sm_env in ('1', 'true', 'on') and not _judge
+        _sm_on = _sm_env in ('1', 'true', 'on') and not (_judge or _stopped)
     if _sm_on:
         _prog("octolinear smoothing")
         _sm_n, _sm_nets, _sm_strip, _sm_added, _sm_stats = smooth_octolinear_chains(
@@ -594,7 +608,8 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
             keep_input_copper=keep_input_copper,
             net_clearances=_nc, board_edge_clearance=_bec,
             config=config,
-            skip_net_ids=_smooth_skip_net_ids(pcb_data))
+            skip_net_ids=_smooth_skip_net_ids(pcb_data),
+            cancel_check=cancel_check)
         counts['smoothed_spans'] = _sm_stats.get('spans', 0)
         counts['smoothed_saved_mm'] = _sm_stats.get('saved_mm', 0.0)
         _trace('smooth')

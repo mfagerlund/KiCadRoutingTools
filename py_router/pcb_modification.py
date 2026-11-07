@@ -5504,7 +5504,8 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                              dry_run: bool = False,
                              min_gain: float = 0.01,
                              max_net_segs: int = 400,
-                             max_chain_segs: int = 100):
+                             max_chain_segs: int = 100,
+                             cancel_check=None):
     """Collapse grid-A* staircase micro-jogs into octolinear shortcuts (#536).
 
     Walks each net's simple track chains (split at junctions, same-net vias,
@@ -5836,6 +5837,11 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
         for net_id in sorted(segs_by_net.keys()):
             if net_id in skip_net_ids:
                 continue
+            if cancel_check is not None and cancel_check():
+                # fork: a stop request ends the pass between nets (each net's result is committed whole)
+                stats['stopped'] = True
+                print(f"Octolinear smoothing: stop requested after {stats['nets']} net(s)", flush=True)
+                break
             net_segs = segs_by_net[net_id]
             if len(net_segs) < 2:
                 continue
