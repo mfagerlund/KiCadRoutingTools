@@ -19,6 +19,7 @@ of chunked rounds: each search commits once checked against the commits made sin
 KRT_NEGOTIATED_MIN_NETS (40: smaller sets, and every call after the first in a process, go straight to the
 sequential loop), KRT_NEGOTIATED_NO_FALLBACK (diagnosis: nothing goes to the sequential loop).
 """
+import math
 import os
 import time
 from typing import Dict, List, Tuple
@@ -214,6 +215,61 @@ def _install_elapsed_tee():
         sys.stdout = _ElapsedTee(sys.stdout, os.path.join(os.path.dirname(os.path.abspath(outs[-1])), 'krt-elapsed.log'))
 
 
+def _debug_sealed(state, nid, picked, origs, index, coord, layer_names):
+    """KRT_NEGOTIATED_DEBUG_SEALED=1: for every terminal cell of an unroutable net, what blocks it: the base map
+    (permanent copper), and which nets' keep-out caches cover the cell (the net's own cache is passable)."""
+    base = state.base_obstacles
+    cache = state.net_obstacles_cache or {}
+    orig = origs[index[nid]]
+    owners = {}
+    for onid, cd in cache.items():
+        cells, _ = _cache_cells_and_vias(cd)
+        for row in cells:
+            owners.setdefault((int(row[0]), int(row[1]), int(row[2])), set()).add(int(onid))
+    for cell, (ox, oy) in sorted(orig.items()):
+        x, y, l = cell
+        blocked = base.is_blocked_hard(int(x), int(y), int(l))
+        vb = base.is_via_blocked_hard(int(x), int(y))
+        zone = base.in_bga_zone(int(x), int(y))
+        own = owners.get((x, y, l), set())
+        print(f"      cell ({x},{y},{layer_names[l] if l < len(layer_names) else l}) at ({ox:.2f},{oy:.2f}): "
+              f"base {'BLOCKED' if blocked else 'free'}, via {'blocked' if vb else 'free'}{', in BGA zone' if zone else ''}, "
+              f"keep-outs {sorted(own - {int(nid)})}{' +own' if int(nid) in own else ''}")
+        # the copper of the net itself at that point, from the board
+        pcb = state.pcb_data
+        near = [f"seg {s.layer} ({s.start_x:.2f},{s.start_y:.2f})-({s.end_x:.2f},{s.end_y:.2f}){' locked' if getattr(s, 'locked', False) else ''}"
+                for s in pcb.segments if s.net_id == nid and min(abs(s.start_x - ox) + abs(s.start_y - oy), abs(s.end_x - ox) + abs(s.end_y - oy)) < 0.05]
+        near += [f"via ({v.x:.2f},{v.y:.2f}){' locked' if getattr(v, 'locked', False) else ''}"
+                 for v in pcb.vias if v.net_id == nid and abs(v.x - ox) + abs(v.y - oy) < 0.05]
+        if near:
+            print("        own copper here: " + '; '.join(near[:4]))
+        if blocked:
+            # foreign copper within reach of the cell: what the base map stamped there
+            nm = lambda n: pcb.net_id_to_name.get(n) or (pcb.nets[n].name if n in pcb.nets and hasattr(pcb.nets[n], 'name') else str(n))
+            reach = 0.5
+            foreign = [f"pad {pd.component_ref}.{pd.pad_number} [{nm(pd.net_id)}] {pd.size_x:.2f}x{pd.size_y:.2f} at ({pd.global_x:.2f},{pd.global_y:.2f}) d={math.hypot(pd.global_x - ox, pd.global_y - oy):.2f}"
+                       for pads in pcb.pads_by_net.values() for pd in pads
+                       if pd.net_id != nid and math.hypot(pd.global_x - ox, pd.global_y - oy) < reach]
+            foreign += [f"via [{nm(v.net_id)}] {v.size:.2f} at ({v.x:.2f},{v.y:.2f}) d={math.hypot(v.x - ox, v.y - oy):.2f}{' locked' if getattr(v, 'locked', False) else ''}"
+                        for v in pcb.vias if v.net_id != nid and math.hypot(v.x - ox, v.y - oy) < reach]
+            foreign += [f"seg [{nm(sg.net_id)}] {sg.layer} w{sg.width:.2f} ({sg.start_x:.2f},{sg.start_y:.2f})-({sg.end_x:.2f},{sg.end_y:.2f}){' locked' if getattr(sg, 'locked', False) else ''}"
+                        for sg in pcb.segments if sg.net_id != nid and min(math.hypot(sg.start_x - ox, sg.start_y - oy), math.hypot(sg.end_x - ox, sg.end_y - oy)) < reach]
+            print("        foreign copper within 0.5 mm: " + ('; '.join(foreign[:8]) if foreign else 'none'))
+            shown = getattr(state, '_sealed_maps_shown', 0)
+            if shown < 6:
+                state._sealed_maps_shown = shown + 1
+                r = 8
+                print(f"        base map {2 * r + 1}x{2 * r + 1} cells around it on {layer_names[l] if l < len(layer_names) else l} "
+                      f"(# blocked, z zone only, . free, X the cell; v = via blocked):")
+                for dy in range(-r, r + 1):
+                    row = ''
+                    for dx in range(-r, r + 1):
+                        b = base.is_blocked_hard(int(x + dx), int(y + dy), int(l))
+                        z = base.in_bga_zone(int(x + dx), int(y + dy))
+                        row += 'X' if (dx == 0 and dy == 0) else ('#' if b else ('z' if z else ('v' if base.is_via_blocked_hard(int(x + dx), int(y + dy)) else '.')))
+                    print('          ' + row)
+
+
 def route_negotiated(state, single_ended_nets: List[Tuple[str, int]], cancel_check=None):
     """Route single_ended_nets by negotiated congestion. Returns (successful, rest, seconds): rest are the
     (name, id) the sequential loop still has to route."""
@@ -252,6 +308,11 @@ def route_negotiated(state, single_ended_nets: List[Tuple[str, int]], cancel_che
         # a wide (power / class) net keeps (its width - the routing width) / 2 more from everything
         net_w = max(config.get_net_track_width(nid, ln) for ln in layer_names)
         extra = max(0.0, (net_w - tw) / 2.0 / g)
+        if config.bga_exclusion_zones:
+            # KRT's window: a BGA exclusion zone blocks every cell on every layer except +-allow_radius cells
+            # around the net's own terminals (single_ended_routing allow_radius = 10); without it a fanout via
+            # under a SiP/BGA is sealed and the net falls to the sequential loop
+            router.add_allowed(int(nid), [(x - 10, y - 10, x + 10, y + 10) for t in terms for (x, y, _) in t[0]])
         router.add_net(int(nid), int(nid), [t[0] for t in terms], extra=extra)
         orig = {}
         for _, o in terms:
@@ -297,6 +358,8 @@ def route_negotiated(state, single_ended_nets: List[Tuple[str, int]], cancel_che
         rep = router.terminal_report(index[n])
         sealed = sum(1 for t in rep if t[2] == 0)
         print(f"    {names.get(n, n)}: {len(rep)} terminals, {sealed} sealed; " + ' '.join(f"{t[0]}/{t[1]}/{t[2]}/{t[3]}" for t in rep))
+        if os.environ.get('KRT_NEGOTIATED_DEBUG_SEALED'):
+            _debug_sealed(state, n, picked, origs, index, coord, layer_names)
 
     th_cache = {}
     ok = 0

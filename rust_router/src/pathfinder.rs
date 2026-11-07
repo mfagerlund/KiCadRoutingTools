@@ -31,6 +31,8 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use crate::obstacle_map::GridObstacleMap;
+use crate::types::pack_xy;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 const NONE: i32 = -1;
 const MULTI: i32 = -2;
@@ -132,6 +134,9 @@ pub struct NegotiatedRouter {
     max_expansions: u64,
     chunk: usize, // >0: fixed-size chunks routed together (Jacobi inside a chunk); 0: disjoint-window batches
     forbidden: Vec<bool>, // per layer: no track may run on it (KRT layer cost -1: plane layers); vias span it
+    // per owner: the cells inside a BGA exclusion zone it may use (KRT's allowed window around each terminal);
+    // the zone blocks every other cell on every layer, tracks and vias alike
+    allowed: FxHashMap<i32, FxHashSet<u64>>,
     log: Vec<String>,
 }
 
@@ -155,7 +160,15 @@ impl NegotiatedRouter {
         if o != NONE && o != owner {
             return false;
         }
-        !self.base.is_blocked(x, y, l as usize)
+        if self.base.is_blocked_hard(x, y, l as usize) {
+            return false;
+        }
+        !self.base.in_bga_zone(x, y) || self.zone_allowed(owner, x, y)
+    }
+
+    #[inline]
+    fn zone_allowed(&self, owner: i32, x: i32, y: i32) -> bool {
+        self.allowed.get(&owner).map_or(false, |s| s.contains(&pack_xy(x, y)))
     }
 
     /// track_ok for a step (px, py) -> (x, y) of net `net`: a wide net (extra > 0) also keeps its extra margin
@@ -188,7 +201,10 @@ impl NegotiatedRouter {
         if o != NONE && o != owner {
             return false;
         }
-        !self.base.is_via_blocked(x, y)
+        if self.base.is_via_blocked_hard(x, y) {
+            return false;
+        }
+        !self.base.in_bga_zone(x, y) || self.zone_allowed(owner, x, y)
     }
 
     fn grid_win(&self) -> Win {
@@ -641,6 +657,7 @@ impl NegotiatedRouter {
             max_expansions: 20_000_000,
             chunk: 16,
             forbidden: vec![false; nl],
+            allowed: FxHashMap::default(),
             log: Vec::new(),
         })
     }
@@ -700,6 +717,25 @@ impl NegotiatedRouter {
                 self.owner_v[c] = if o == NONE || o == owner { owner } else { MULTI };
             }
         }
+    }
+
+    /// Cells inside a BGA exclusion zone that `owner` may use: inclusive grid rectangles (x0, y0, x1, y1), KRT's
+    /// window around each terminal. Cells outside every zone are dropped (never blocked by a zone). Call before
+    /// `add_net`, which keeps a terminal's cells by `track_ok`. Returns the cells kept.
+    pub fn add_allowed(&mut self, owner: i32, rects: Vec<(i32, i32, i32, i32)>) -> usize {
+        let base = &self.base;
+        let set = self.allowed.entry(owner).or_default();
+        let mut n = 0;
+        for (x0, y0, x1, y1) in rects {
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    if base.in_bga_zone(x, y) && set.insert(pack_xy(x, y)) {
+                        n += 1;
+                    }
+                }
+            }
+        }
+        n
     }
 
     /// A net to route: its terminals, each a list of (gx, gy, layer) cells; extra = (its track width - the routing
