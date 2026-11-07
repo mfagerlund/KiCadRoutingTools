@@ -561,38 +561,61 @@ def _foreign_seg_arrays(pcb_data, layer):
     per_layer = cache[1]
     arr = per_layer.get(layer)
     if arr is None:
-        nid, ax, ay, bx, by, hw = [], [], [], [], [], []
-        _row_segs = []
-        _own_pad_nets = _cached_own_pad_nets(pcb_data)
-        for s in pcb_data.segments:
-            if s.layer == layer:
-                _row_segs.append(s)
-                nid.append(s.net_id); ax.append(s.start_x); ay.append(s.start_y)
-                bx.append(s.end_x); by.append(s.end_y)
-                hw.append((s.width if s.width > 0 else 0.0) / 2.0)
-        # A via spans its drilled layers; treat every via as present on this copper
-        # layer (a conservative over-approximation -- it only ever necks MORE).
-        for v in pcb_data.vias:
-            r = (v.size if getattr(v, 'size', 0) and v.size > 0 else 0.0) / 2.0
-            nid.append(v.net_id); ax.append(v.x); ay.append(v.y)
-            bx.append(v.x); by.append(v.y); hw.append(r)
-        # #908: which rows are a FOOTPRINT'S OWN copper, and which nets that
-        # copper is the intended conductor for. A net tie's bridge is net 0, so
-        # the plain `nid != net_id` test below calls it foreign to the very
-        # nets it exists to join -- and the terminal SHORT gate then rejects
-        # every rescue that lands on the tie pad ("terminal copper would
-        # OVERLAP a foreign track/via"). Recorded here so the mask is built
-        # once per (layer, net) and dies with these arrays.
-        _g_rows, _g_nets = [], []
-        for _i, _s in enumerate(_row_segs):
-            if getattr(_s, 'graphic', False):
-                _lift = _own_pad_nets.get(id(_s))
-                if _lift:
-                    _g_rows.append(_i); _g_nets.append(_lift)
+        # One pass over the copper per cache drop, every layer's rows at once
+        # (2026-11-07): the smoothing pass drops the cache at every splice and
+        # then asks for the layers of the chain it moved one by one, so each
+        # splice paid one full Python pass over the segments PER LAYER (777
+        # rebuilds, 6.4M list appends, 10 s of the Revenant route stage's
+        # 35 s smoothing pass). The rows of a layer are its segments in list
+        # order, then every via, exactly as before.
+        snap = per_layer.get('_all')
+        if snap is None:
+            segs = pcb_data.segments
+            lay = np.asarray([s.layer for s in segs], dtype=object)
+            s_nid = np.asarray([s.net_id for s in segs], dtype=np.int64)
+            s_ax = np.asarray([s.start_x for s in segs], dtype=float)
+            s_ay = np.asarray([s.start_y for s in segs], dtype=float)
+            s_bx = np.asarray([s.end_x for s in segs], dtype=float)
+            s_by = np.asarray([s.end_y for s in segs], dtype=float)
+            s_hw = np.asarray([(s.width if s.width > 0 else 0.0) / 2.0 for s in segs], dtype=float)
+            vias = pcb_data.vias
+            v_nid = np.asarray([v.net_id for v in vias], dtype=np.int64)
+            v_x = np.asarray([v.x for v in vias], dtype=float)
+            v_y = np.asarray([v.y for v in vias], dtype=float)
+            # A via spans its drilled layers; treat every via as present on every copper
+            # layer (a conservative over-approximation -- it only ever necks MORE).
+            v_hw = np.asarray([(v.size if getattr(v, 'size', 0) and v.size > 0 else 0.0) / 2.0
+                               for v in vias], dtype=float)
+            # #908: which rows are a FOOTPRINT'S OWN copper, and which nets that
+            # copper is the intended conductor for. A net tie's bridge is net 0, so
+            # the plain `nid != net_id` test below calls it foreign to the very
+            # nets it exists to join -- and the terminal SHORT gate then rejects
+            # every rescue that lands on the tie pad ("terminal copper would
+            # OVERLAP a foreign track/via"). Recorded per layer as the row
+            # indices of the lifted graphic segments, and dies with these arrays.
+            g_idx = [i for i, s in enumerate(segs) if getattr(s, 'graphic', False)]
+            g_lift = []
+            if g_idx:
+                _own_pad_nets = _cached_own_pad_nets(pcb_data, (id(segs), id(getattr(pcb_data, 'footprints', None)),
+                                                                len(g_idx), sum(id(segs[i]) for i in g_idx)))
+                for i in g_idx:
+                    _lift = _own_pad_nets.get(id(segs[i]))
+                    if _lift:
+                        g_lift.append((i, _lift))
+            snap = (lay, s_nid, s_ax, s_ay, s_bx, s_by, s_hw, v_nid, v_x, v_y, v_hw, g_lift)
+            per_layer['_all'] = snap
+        lay, s_nid, s_ax, s_ay, s_bx, s_by, s_hw, v_nid, v_x, v_y, v_hw, g_lift = snap
+        mask = (lay == layer) if lay.size else np.zeros(0, dtype=bool)
+        if g_lift:
+            pos = np.cumsum(mask) - 1
+            _g_rows = [int(pos[i]) for i, _ in g_lift if mask[i]]
+            _g_nets = [_lift for i, _lift in g_lift if mask[i]]
+        else:
+            _g_rows, _g_nets = [], []
         per_layer[(layer, 'giftrows')] = (_g_rows, _g_nets)
-        arr = (np.asarray(nid, dtype=np.int64), np.asarray(ax, dtype=float),
-               np.asarray(ay, dtype=float), np.asarray(bx, dtype=float),
-               np.asarray(by, dtype=float), np.asarray(hw, dtype=float))
+        arr = (np.concatenate((s_nid[mask], v_nid)), np.concatenate((s_ax[mask], v_x)),
+               np.concatenate((s_ay[mask], v_y)), np.concatenate((s_bx[mask], v_x)),
+               np.concatenate((s_by[mask], v_y)), np.concatenate((s_hw[mask], v_hw)))
         per_layer[layer] = arr
         # the per-item bounding boxes _seg_foreign_seg_dist windows on,
         # once per rebuild instead of four array ops per query (23.6k
@@ -605,10 +628,14 @@ def _foreign_seg_arrays(pcb_data, layer):
     return arr
 
 
-def _cached_own_pad_nets(pcb_data):
-    """`graphic_own_pad_nets` memoised on pcb_data, keyed with the segment
-    cache signature so it dies exactly when that does."""
-    sig = getattr(pcb_data, '_foreign_seg_arr_cache', (None,))[0]
+def _cached_own_pad_nets(pcb_data, sig):
+    """`graphic_own_pad_nets` memoised on pcb_data, keyed on the graphic
+    segments and the footprints it reads (`sig`: the segment list's identity,
+    the footprints' identity, the graphic segments' count and the sum of
+    their ids). Routing never adds, removes or moves a footprint's own copper,
+    so the lift survives the splices that drop the segment arrays (it was
+    keyed on their signature and recomputed after every splice: 2.9 s of the
+    Revenant route stage's smoothing pass, 2026-11-07)."""
     hit = getattr(pcb_data, '_gopn_cache', None)
     if hit is not None and hit[0] == sig:
         return hit[1]
