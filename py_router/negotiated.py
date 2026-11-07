@@ -182,16 +182,19 @@ def register_success(state, net_id, result):
 
 
 class _ElapsedTee:
-    """stdout unchanged, plus a copy of every line stamped with wall-clock seconds since the tee began."""
+    """stdout unchanged, plus a copy of every line stamped with wall-clock seconds since the tee began and, after it,
+    the process's own CPU seconds (`<wall> <cpu>c <line>`, 2026-11-07): the CPU column does not move with another
+    process's load on the machine, so a stage can be judged on it when the wall clock cannot be trusted."""
 
     def __init__(self, inner, path):
         self.inner, self.f, self.t0, self.bol = inner, open(path, 'a', encoding='utf-8'), time.time(), True
+        self.c0 = time.process_time()
 
     def write(self, s):
         self.inner.write(s)
         for part in s.splitlines(True):
             if self.bol:
-                self.f.write(f'{time.time() - self.t0:8.1f} ')
+                self.f.write(f'{time.time() - self.t0:8.1f} {time.process_time() - self.c0:7.1f}c ')
             self.f.write(part)
             self.bol = part.endswith('\n')
         self.f.flush()
