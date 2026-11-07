@@ -233,8 +233,14 @@ def route_negotiated(state, single_ended_nets: List[Tuple[str, int]], cancel_che
         router.add_keepout(int(nid), np.ascontiguousarray(cells, dtype=np.int32),
                            np.ascontiguousarray(vias, dtype=np.int32))
 
+    # KRT's layer costs: a negative cost forbids tracks on that layer (route.py appends the copper layers the
+    # caller did not list, the plane layers, with cost -1); through vias still span it
+    forbidden = [c < 0 for c in config.get_layer_costs()]
+    router.set_layer_forbidden(forbidden)
+
     picked, rest, origs = [], [], []
     max_terms = _env_num('KRT_NEGOTIATED_MAX_TERMINALS', 32, int)
+    tw = config.track_width
     for name, nid in single_ended_nets:
         if nid in olinks:
             rest.append((name, nid))
@@ -243,7 +249,10 @@ def route_negotiated(state, single_ended_nets: List[Tuple[str, int]], cancel_che
         if not terms or len(terms) > max_terms:
             rest.append((name, nid))  # a plane-like tree (hundreds of pads) is cheaper net by net, after the rest
             continue
-        router.add_net(int(nid), int(nid), [t[0] for t in terms])
+        # a wide (power / class) net keeps (its width - the routing width) / 2 more from everything
+        net_w = max(config.get_net_track_width(nid, ln) for ln in layer_names)
+        extra = max(0.0, (net_w - tw) / 2.0 / g)
+        router.add_net(int(nid), int(nid), [t[0] for t in terms], extra=extra)
         orig = {}
         for _, o in terms:
             orig.update(o)
@@ -277,6 +286,17 @@ def route_negotiated(state, single_ended_nets: List[Tuple[str, int]], cancel_che
     print(f"  negotiation {stats['stopped']} after {stats['passes']} passes, {stats['seconds']:.1f} s, "
           f"{stats['searches']} searches, {stats['expansions']} expansions; routed {stats['routed']}, "
           f"dropped {len(stats['dropped'])}, unroutable {len(stats['unroutable'])}")
+    names = {nid: name for name, nid in picked}
+    index = {nid: i for i, (_, nid) in enumerate(picked)}
+    for key in ('unroutable', 'dropped'):
+        if stats[key]:
+            print(f"  negotiation {key}: {', '.join(names.get(n, str(n)) for n in stats[key])}")
+    for n in stats['unroutable']:
+        # per terminal: (cells, cells a track may stand on, cells with a free neighbour or via, cells on a
+        # forbidden layer): a terminal with no free cell is sealed in by hard copper
+        rep = router.terminal_report(index[n])
+        sealed = sum(1 for t in rep if t[2] == 0)
+        print(f"    {names.get(n, n)}: {len(rep)} terminals, {sealed} sealed; " + ' '.join(f"{t[0]}/{t[1]}/{t[2]}/{t[3]}" for t in rep))
 
     th_cache = {}
     ok = 0

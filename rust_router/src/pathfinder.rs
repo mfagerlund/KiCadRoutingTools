@@ -62,6 +62,10 @@ struct Net {
     centres: Vec<(f32, f32, f32)>, // per terminal: centre x, y and radius (cells) for the heuristic
     bbox: Win,                     // terminals' bounding box
     full: bool,                    // window failed once: search the whole grid
+    extra: f32,                    // (net width - routing width) / 2 in cells: a wide net keeps this much more
+    dt: Vec<(i32, i32)>,           // its track paint disk: r_tt + 2 extra (both halves of the surplus width)
+    dtv: Vec<(i32, i32)>,          // its via-block paint disk: r_tv + extra
+    ext: Vec<(i32, i32)>,          // the extra-margin disk its own centreline must keep clear (empty: none)
 }
 
 #[derive(Clone, Default)]
@@ -127,6 +131,7 @@ pub struct NegotiatedRouter {
     stop_file: Option<String>, // stop (as on the time limit) once this file exists
     max_expansions: u64,
     chunk: usize, // >0: fixed-size chunks routed together (Jacobi inside a chunk); 0: disjoint-window batches
+    forbidden: Vec<bool>, // per layer: no track may run on it (KRT layer cost -1: plane layers); vias span it
     log: Vec<String>,
 }
 
@@ -151,6 +156,31 @@ impl NegotiatedRouter {
             return false;
         }
         !self.base.is_blocked(x, y, l as usize)
+    }
+
+    /// track_ok for a step (px, py) -> (x, y) of net `net`: a wide net (extra > 0) also keeps its extra margin
+    /// clear of hard copper (KRT's swept capsule check on the base map) and of other owners' keep-outs.
+    #[inline]
+    fn step_ok(&self, net: &Net, px: i32, py: i32, x: i32, y: i32, l: u8, c: usize) -> bool {
+        if !self.track_ok(net.owner, x, y, l, c) {
+            return false;
+        }
+        if net.ext.is_empty() {
+            return true;
+        }
+        if self.base.segment_blocked(px, py, x, y, l as usize, net.extra as f64) {
+            return false;
+        }
+        let plane = self.plane();
+        for &(dx, dy) in &net.ext {
+            if let Some(cc) = self.cell(x + dx, y + dy) {
+                let o = self.owner_t[l as usize * plane + cc];
+                if o != NONE && o != net.owner {
+                    return false;
+                }
+            }
+        }
+        true
     }
     #[inline]
     fn via_ok(&self, owner: i32, x: i32, y: i32, c: usize) -> bool {
@@ -234,9 +264,22 @@ impl NegotiatedRouter {
             (win.x0 + (r % ww) as i32, win.y0 + (r / ww) as i32, l as u8)
         };
         let plane = self.plane();
+        // present cost: the occupancy at the centreline cell; a wide net sees the most occupied cell within its
+        // extra margin (its copper reaches that far), so it prices a neighbour's paint at its own width
+        let gw = self.w;
+        let (gx0, gy0) = (self.x0, self.y0);
         let pres_t = |c: usize, l: u8| -> f32 {
             let k = l as usize * plane + c;
-            (1.0 + self.hist_t[k]) * (1.0 + pres * self.occ_t[k].load(AO::Relaxed) as f32)
+            let mut occ = self.occ_t[k].load(AO::Relaxed);
+            if !net.ext.is_empty() {
+                let (x, y) = (gx0 + (c % gw as usize) as i32, gy0 + (c / gw as usize) as i32);
+                for &(dx, dy) in &net.ext {
+                    if let Some(cc) = self.cell(x + dx, y + dy) {
+                        occ = occ.max(self.occ_t[l as usize * plane + cc].load(AO::Relaxed));
+                    }
+                }
+            }
+            (1.0 + self.hist_t[k]) * (1.0 + pres * occ as f32)
         };
 
         for _round in 1..nt {
@@ -289,8 +332,12 @@ impl NegotiatedRouter {
                 }
                 let (x, y, l) = decode(i);
                 let d0 = dir[i];
-                // planar moves
+                // planar moves (none along a forbidden layer: a plane layer is reached only through a via, at a
+                // terminal that lives there)
                 for (di, &(dx, dy)) in DIRS.iter().enumerate() {
+                    if self.forbidden[l as usize] {
+                        break;
+                    }
                     let nx = x + dx;
                     let ny = y + dy;
                     if !win.contains(nx, ny) {
@@ -301,7 +348,7 @@ impl NegotiatedRouter {
                         continue;
                     }
                     let c = match self.cell(nx, ny) { Some(c) => c, None => continue };
-                    if !is_term(j) && !tree_mark[j] && !self.track_ok(net.owner, nx, ny, l, c) {
+                    if !is_term(j) && !tree_mark[j] && !self.step_ok(net, x, y, nx, ny, l, c) {
                         continue;
                     }
                     let len = if dx != 0 && dy != 0 { 1.41421356 } else { 1.0 };
@@ -336,7 +383,8 @@ impl NegotiatedRouter {
                             if closed[j] == generation * 2 {
                                 continue;
                             }
-                            if !is_term(j) && !tree_mark[j] && !self.track_ok(net.owner, x, y, l2, c) {
+                            if !is_term(j) && !tree_mark[j]
+                                && (self.forbidden[l2 as usize] || !self.step_ok(net, x, y, x, y, l2, c)) {
                                 continue;
                             }
                             let ng = gc + vstep;
@@ -402,7 +450,9 @@ impl NegotiatedRouter {
     }
 
     /// Paint a route's copper into occ_t / occ_v (union per net); returns the painted cell lists (sorted).
-    fn paint(&self, paths: &[Vec<(i32, i32, u8)>], dt: &[(i32, i32)], dtv: &[(i32, i32)], dvv: &[(i32, i32)]) -> Route {
+    /// The track disks are the net's own (a wide net paints wider); the via-via disk is shared.
+    fn paint(&self, paths: &[Vec<(i32, i32, u8)>], net: &Net, dvv: &[(i32, i32)]) -> Route {
+        let (dt, dtv) = (&net.dt, &net.dtv);
         let plane = self.plane();
         let nl = self.nl;
         let mut pt: Vec<u32> = Vec::new();
@@ -488,7 +538,22 @@ impl NegotiatedRouter {
         false
     }
 
-    fn conflicts(&self, r: &Route) -> (Vec<usize>, Vec<usize>) {
+    /// Whether any cell within `ext` of (x, y) on layer l carries occupancy above `more` (a wide net's margin;
+    /// its own paint covers the margin, so above 1 there is foreign copper).
+    #[inline]
+    fn occ_near(&self, net: &Net, x: i32, y: i32, l: u8, more: u16) -> bool {
+        let plane = self.plane();
+        for &(dx, dy) in &net.ext {
+            if let Some(cc) = self.cell(x + dx, y + dy) {
+                if self.occ_t[l as usize * plane + cc].load(AO::Relaxed) > more {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn conflicts(&self, r: &Route, net: &Net) -> (Vec<usize>, Vec<usize>) {
         let plane = self.plane();
         let mut ct = Vec::new();
         let mut cv = Vec::new();
@@ -496,7 +561,7 @@ impl NegotiatedRouter {
             for (k, &(x, y, l)) in p.iter().enumerate() {
                 let c = match self.cell(x, y) { Some(c) => c, None => continue };
                 let kt = l as usize * plane + c;
-                if self.occ_t[kt].load(AO::Relaxed) > 1 {
+                if self.occ_t[kt].load(AO::Relaxed) > 1 || self.occ_near(net, x, y, l, 1) {
                     ct.push(kt);
                 }
                 let is_via = k + 1 < p.len() && p[k + 1].0 == x && p[k + 1].1 == y && p[k + 1].2 != l;
@@ -575,8 +640,44 @@ impl NegotiatedRouter {
             pres_max: 30.0,
             max_expansions: 20_000_000,
             chunk: 16,
+            forbidden: vec![false; nl],
             log: Vec::new(),
         })
+    }
+
+    /// Per layer: true = no track on it (KRT's layer cost -1, e.g. the plane layers); through vias still span it
+    /// and a terminal there is still reached.
+    pub fn set_layer_forbidden(&mut self, forbidden: Vec<bool>) -> PyResult<()> {
+        if forbidden.len() != self.nl {
+            return Err(pyo3::exceptions::PyValueError::new_err(format!("{} layers, {} flags", self.nl, forbidden.len())));
+        }
+        self.forbidden = forbidden;
+        Ok(())
+    }
+
+    /// Diagnosis of net index i: per terminal (cells, cells its track may stand on, cells with a free planar
+    /// neighbour or via, cells on a forbidden layer). A terminal with no free neighbour and no via is sealed in.
+    pub fn terminal_report(&self, i: usize) -> Vec<(usize, usize, usize, usize)> {
+        let net = match self.nets.get(i) { Some(n) => n, None => return vec![] };
+        net.terminals.iter().map(|t| {
+            let (mut ok, mut free, mut forb) = (0, 0, 0);
+            for &(x, y, l) in t {
+                let c = match self.cell(x, y) { Some(c) => c, None => continue };
+                if self.forbidden[l as usize] {
+                    forb += 1;
+                }
+                if self.track_ok(net.owner, x, y, l, c) {
+                    ok += 1;
+                }
+                let planar = !self.forbidden[l as usize] && DIRS.iter().any(|&(dx, dy)| {
+                    self.cell(x + dx, y + dy).map_or(false, |cc| self.step_ok(net, x, y, x + dx, y + dy, l, cc))
+                });
+                if planar || self.via_ok(net.owner, x, y, c) {
+                    free += 1;
+                }
+            }
+            (t.len(), ok, free, forb)
+        }).collect()
     }
 
     /// Keep-out cells of one owner (a net's pads and stubs): blocked for every other owner.
@@ -601,8 +702,10 @@ impl NegotiatedRouter {
         }
     }
 
-    /// A net to route: its terminals, each a list of (gx, gy, layer) cells. Returns its index.
-    pub fn add_net(&mut self, net_id: i64, owner: i32, terminals: Vec<Vec<(i32, i32, u8)>>) -> PyResult<usize> {
+    /// A net to route: its terminals, each a list of (gx, gy, layer) cells; extra = (its track width - the routing
+    /// width) / 2 in cells for a wide (power) net. Returns its index.
+    #[pyo3(signature = (net_id, owner, terminals, extra=0.0))]
+    pub fn add_net(&mut self, net_id: i64, owner: i32, terminals: Vec<Vec<(i32, i32, u8)>>, extra: f32) -> PyResult<usize> {
         // a terminal keeps its first cell (the pad centre) and every other cell the net may stand on
         let terms: Vec<Vec<(i32, i32, u8)>> = terminals.into_iter().map(|t| {
             t.iter().enumerate().filter(|&(k, &(x, y, l))| {
@@ -633,7 +736,8 @@ impl NegotiatedRouter {
             }).fold(0.0f32, f32::max);
             centres.push((cx, cy, r));
         }
-        self.nets.push(Net { net_id, owner, terminals: terms, centres, bbox: bb, full: false });
+        self.nets.push(Net { net_id, owner, terminals: terms, centres, bbox: bb, full: false,
+                             extra: extra.max(0.0), dt: Vec::new(), dtv: Vec::new(), ext: Vec::new() });
         self.routes.push(None);
         self.unroutable.push(false);
         Ok(self.nets.len() - 1)
@@ -675,9 +779,15 @@ impl NegotiatedRouter {
     pub fn run<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let t0 = Instant::now();
         let n = self.nets.len();
-        let dt = Self::disk(self.r_tt);
-        let dtv = Self::disk(self.r_tv);
         let dvv = Self::disk(self.r_vv);
+        // per-net paint disks (the parameters are final now): a wide net paints r_tt + 2 extra around its tracks
+        // and keeps r_tv + extra from foreign vias; its own centreline keeps `extra` from hard copper
+        let (r_tt, r_tv) = (self.r_tt, self.r_tv);
+        for net in self.nets.iter_mut() {
+            net.dt = Self::disk(r_tt + net.extra);  // a default neighbour must keep r_tt + this net's extra
+            net.dtv = Self::disk(r_tv + net.extra);
+            net.ext = if net.extra > 0.0 { Self::disk(net.extra + 0.5) } else { Vec::new() };
+        }
         let pool = rayon::ThreadPoolBuilder::new().num_threads(self.threads).build()
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         // first pass order: smallest bounding box first
@@ -711,7 +821,7 @@ impl NegotiatedRouter {
                 let olds: Vec<(usize, Option<Route>)> = todo.iter().map(|&ni| (ni, self.routes[ni].take())).collect();
                 let log: Mutex<Vec<(Vec<u32>, Vec<u32>)>> = Mutex::new(Vec::new());
                 let me: &Self = self;
-                let (dt_, dtv_, dvv_) = (&dt, &dtv, &dvv);
+                let dvv_ = &dvv;
                 // (net, route, full window used, unroutable, expansions, searches, retries, cut short)
                 let res: Vec<(usize, Option<Route>, bool, bool, u64, u64, usize, bool)> = py.allow_threads(|| {
                     pool.install(|| {
@@ -719,7 +829,7 @@ impl NegotiatedRouter {
                             let mut full = me.nets[ni].full;
                             if me.out_of_time(&t0) {
                                 // keep what it had: repaint the old route
-                                let r = old.map(|r| { me.unpaint(&r); me.paint(&r.paths, dt_, dtv_, dvv_) });
+                                let r = old.map(|r| { me.unpaint(&r); me.paint(&r.paths, &me.nets[ni], dvv_) });
                                 return (ni, r, full, false, 0, 0, 0, true);
                             }
                             if let Some(r) = &old {
@@ -746,7 +856,7 @@ impl NegotiatedRouter {
                                             retries += 1;
                                             continue;
                                         }
-                                        let r = me.paint(&paths, dt_, dtv_, dvv_);
+                                        let r = me.paint(&paths, &me.nets[ni], dvv_);
                                         lg.push((r.painted_t.clone(), r.painted_v.clone()));
                                         return (ni, Some(r), full, false, exp, srch, retries, false);
                                     }
@@ -811,7 +921,7 @@ impl NegotiatedRouter {
                             round.par_iter().map(|&ni| {
                                 let st = Instant::now();
                                 let (p, e) = me.route_net(ni, pres);
-                                let c0 = p.as_ref().map_or(0, |paths| me.foreign_hits(paths));
+                                let c0 = p.as_ref().map_or(0, |paths| me.foreign_hits(paths, &me.nets[ni]));
                                 (ni, p, e, c0, st.elapsed().as_secs_f64())
                             }).collect()
                         })
@@ -835,11 +945,11 @@ impl NegotiatedRouter {
                         searches += 1;
                         match p {
                             Some(paths) => {
-                                if k > 0 && self.foreign_hits(&paths) > c0 {
+                                if k > 0 && self.foreign_hits(&paths, &self.nets[ni]) > c0 {
                                     stale.push(ni);
                                     continue;
                                 }
-                                let r = self.paint(&paths, &dt, &dtv, &dvv);
+                                let r = self.paint(&paths, &self.nets[ni], &dvv);
                                 self.routes[ni] = Some(r);
                             }
                             None => {
@@ -865,7 +975,7 @@ impl NegotiatedRouter {
                     searches += 1;
                     match p {
                         Some(paths) => {
-                            let r = self.paint(&paths, &dt, &dtv, &dvv);
+                            let r = self.paint(&paths, &self.nets[ni], &dvv);
                             self.routes[ni] = Some(r);
                         }
                         None => self.unroutable[ni] = true,
@@ -879,7 +989,7 @@ impl NegotiatedRouter {
             let mut hist_v_add = Vec::new();
             for ni in 0..n {
                 if let Some(r) = &self.routes[ni] {
-                    let (ct, cv) = self.conflicts(r);
+                    let (ct, cv) = self.conflicts(r, &self.nets[ni]);
                     if !ct.is_empty() || !cv.is_empty() {
                         ncells += ct.len() + cv.len();
                         conflicted.push(ni);
@@ -949,7 +1059,7 @@ impl NegotiatedRouter {
     /// cells (x, y) inside a foreign via keep-out (diagnosis).
     pub fn conflict_cells(&self, i: usize) -> (Vec<(i32, i32, u8)>, Vec<(i32, i32)>) {
         let r = match self.routes.get(i).and_then(|r| r.as_ref()) { Some(r) => r, None => return (vec![], vec![]) };
-        let (ct, cv) = self.conflicts(r);
+        let (ct, cv) = self.conflicts(r, &self.nets[i]);
         let plane = self.plane();
         let w = self.w as usize;
         let xy = |c: usize| (self.x0 + (c % w) as i32, self.y0 + (c / w) as i32);
@@ -961,13 +1071,13 @@ impl NegotiatedRouter {
 impl NegotiatedRouter {
     /// Cells of an unpainted route inside another net's keep-out now: track centreline cells with any occupancy,
     /// via cells with any via occupancy on some layer.
-    fn foreign_hits(&self, paths: &[Vec<(i32, i32, u8)>]) -> usize {
+    fn foreign_hits(&self, paths: &[Vec<(i32, i32, u8)>], net: &Net) -> usize {
         let plane = self.plane();
         let mut k = 0;
         for p in paths {
             for (i, &(x, y, l)) in p.iter().enumerate() {
                 let c = match self.cell(x, y) { Some(c) => c, None => continue };
-                if self.occ_t[l as usize * plane + c].load(AO::Relaxed) > 0 {
+                if self.occ_t[l as usize * plane + c].load(AO::Relaxed) > 0 || self.occ_near(net, x, y, l, 0) {
                     k += 1;
                 }
                 if i + 1 < p.len() && p[i + 1].0 == x && p[i + 1].1 == y && p[i + 1].2 != l
@@ -986,7 +1096,7 @@ impl NegotiatedRouter {
             let mut worst: Option<(usize, usize)> = None;
             for ni in 0..n {
                 if let Some(r) = &self.routes[ni] {
-                    let (ct, cv) = self.conflicts(r);
+                    let (ct, cv) = self.conflicts(r, &self.nets[ni]);
                     let k = ct.len() + cv.len();
                     if k > 0 && worst.map_or(true, |(_, wk)| k > wk) {
                         worst = Some((ni, k));

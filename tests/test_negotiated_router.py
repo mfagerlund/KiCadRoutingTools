@@ -137,6 +137,41 @@ def main():
     legal = all(min_gap(kept[i], kept[j]) > R_TT for i in range(len(kept)) for j in range(i + 1, len(kept)))
     check(len(kept) == 2 and legal, f"G async: two through the two-lane corridor, legal ({len(kept)} kept)")
 
+    # H: forbidden layer (KRT layer cost -1): layer 1 carries no track; A's crossing pair must go round on layer 0
+    r = router(2)
+    r.set_layer_forbidden([False, True])
+    a = r.add_net(1, 1, [[(2, 6, 0)], [(37, 14, 0)]])
+    b = r.add_net(2, 2, [[(2, 14, 0)], [(37, 6, 0)]])
+    s = r.run()
+    pa, pb = r.paths(a), r.paths(b)
+    on1 = [c for c in cells((pa or []) + (pb or [])) if c[2] == 1]
+    check(s['routed'] == 2 and bool(pa) and bool(pb) and not on1 and min_gap(pa, pb) > R_TT,
+          f"H forbidden layer carries no track ({s['routed']} routed, {len(on1)} cells on layer 1)")
+    # a terminal on the forbidden layer (a through-hole pad on a plane layer) is still reached, by a via at the pad
+    r = router(2)
+    r.set_layer_forbidden([False, True])
+    a = r.add_net(1, 1, [[(2, 6, 1)], [(37, 6, 0)]])
+    s = r.run()
+    pa = r.paths(a)
+    on1 = {c for c in cells(pa or []) if c[2] == 1}
+    check(bool(pa) and on1 <= {(2, 6, 1)}, f"H terminal on the forbidden layer reached only at the pad (layer-1 cells {sorted(on1)})")
+
+    # I: a wide net (extra 2 cells each side) keeps r_tt + extra from a default net and extra from hard copper.
+    # The wall pushes the wide net from row 9 to row 10 over x 10..29; the default net on row 13 must then dip to 14.
+    wall = [(x, 7, 0) for x in range(10, 30)]
+    r = router(1, blocked=wall)
+    wnet = r.add_net(1, 1, [[(2, 9, 0)], [(37, 9, 0)]], extra=2.0)
+    nnet = r.add_net(2, 2, [[(2, 13, 0)], [(37, 13, 0)]])
+    s = r.run()
+    pw, pn = r.paths(wnet), r.paths(nnet)
+    wall_gap = min((math.hypot(x - u, y - v) for (x, y, l) in cells(pw or []) for (u, v, m) in wall), default=math.inf)
+    check(s['routed'] == 2 and bool(pw) and bool(pn) and min_gap(pw, pn) >= R_TT + 2.0,
+          f"I wide net keeps r_tt + extra from its neighbour (gap {min_gap(pw, pn) if pw and pn else None})")
+    check(bool(pw) and wall_gap >= 2.0, f"I wide net keeps extra from hard copper (gap {wall_gap:.2f})")
+    check(s['stopped'] == 'converged' and not s['dropped'], f"I converged with nothing dropped ({s['stopped']}, {s['passes']} passes)")
+    rep = r.terminal_report(wnet)
+    check(len(rep) == 2 and all(t[0] == 1 and t[2] == 1 for t in rep), f"I terminal_report sees free terminals ({rep})")
+
     print(f'\n{len(FAILS)} failure(s)')
     return 1 if FAILS else 0
 
