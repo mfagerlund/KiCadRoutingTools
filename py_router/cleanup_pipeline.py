@@ -166,6 +166,7 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
                            smooth: bool = False,
                            merge_collinear: bool = True,
                            strict_collapse: bool = True,
+                           cancel_check=None,
                            ) -> CleanupOutcome:
     """Run the post-route cleanup passes in their one canonical order.
 
@@ -301,6 +302,18 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
     _locked_scope = _locked_copper_net_ids(pcb_data)
     _mutable_scope = _without_net_ids(scope_net_ids, _locked_scope, pcb_data)
 
+    # fork: a stop request (route-board's --budget-s stop file through cancel_check) skips the cosmetic passes,
+    # whole passes only, so the board/write-list ledger stays as consistent as with the passes' own off switches;
+    # the ledger-keeping passes (phantom reconcile, orphan islands, dead-end sweep, dangle trim, width neck,
+    # soft joints, collinear merge) still run. Koppar's stmp157/imx8mp were killed inside a 300-600 s smoothing
+    # after the stop came and returned no board.
+    _stopped = bool(cancel_check is not None and cancel_check())
+    if _stopped:
+        print(f"{label}Cleanup: stop requested, skipping the cosmetic passes (graze prune, re-bend, "
+              f"micro-shift, via nudge, cycle prune, strict collapse, smoothing)", flush=True)
+        graze = octolinear = via_nudge = cycles = smooth = strict_collapse = False
+        counts['stopped'] = 1
+
     _trace('start')
     if snap:
         _prog("stub-gap snap")
@@ -381,8 +394,11 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
             print(f"{label}Graze nudge: re-bent grazing octolinear jog(s) "
                   f"on {_nz_nets} net(s)")
 
-    _prog("graze micro-shift")
-    _ms_segs, _ms_nets, _ms_strip, _ = nudge_grazing_microshift(
+    if _stopped:
+        _ms_segs, _ms_nets, _ms_strip = 0, 0, []
+    else:
+        _prog("graze micro-shift")
+        _ms_segs, _ms_nets, _ms_strip, _ = nudge_grazing_microshift(
         results, pcb_data, _mutable_scope, clearance=config.clearance,
         max_shift=(microshift_max_shift if microshift_max_shift is not None
                    else config.grid_step / 2),
@@ -569,7 +585,8 @@ def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, *,
             keep_input_copper=keep_input_copper,
             net_clearances=_nc, board_edge_clearance=_bec,
             config=config,
-            skip_net_ids=_smooth_skip_net_ids(pcb_data))
+            skip_net_ids=_smooth_skip_net_ids(pcb_data),
+            cancel_check=cancel_check)
         counts['smoothed_spans'] = _sm_stats.get('spans', 0)
         counts['smoothed_saved_mm'] = _sm_stats.get('saved_mm', 0.0)
         _trace('smooth')

@@ -3371,6 +3371,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                           | {id(v) for v in all_swap_vias}),
         keep_input_copper=keep_input_copper,
         progress_callback=progress_callback,
+        cancel_check=cancel_check,   # fork: route-board's stop file skips the cosmetic passes
         # #536 octolinear smoothing: ON by default (restored).
         #
         # It was briefly defaulted OFF on the theory that smoothing mid-chain
