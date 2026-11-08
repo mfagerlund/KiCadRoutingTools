@@ -1,4 +1,4 @@
-"""Via rungs keep the board's copper-to-hole floor (--hole-clearance / KICAD_HOLE_CLEARANCE)."""
+"""Via rungs keep the board's copper-to-hole floor (--rung-hole-clearance / KICAD_HOLE_CLEARANCE)."""
 import os
 import sys
 
