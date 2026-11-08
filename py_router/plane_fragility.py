@@ -291,6 +291,7 @@ class FragilityField:
             return
         pad_mm = self.carve_r_mm + self.depth * self.coord.grid_step
         changed = False
+        dirty = set()
         for st in self.states:
             bb = [np.inf, np.inf, -np.inf, -np.inf]
             if st.li in boxes:
@@ -318,44 +319,65 @@ class FragilityField:
                                              wi0 - ci0:wi1 - ci0]
             self._regen_rows(st)
             changed = True
+            dirty.add(st.li)
         if changed:
-            self.publish()
+            self.publish(dirty)
             self.refreshes += 1
         self.refresh_s += _time.perf_counter() - t0
 
-    def publish(self):
-        rows = [st.rows for st in self.states if st.rows is not None]
-        if rows:
-            out = np.vstack(rows)
-            # Same max-cost dedup the STATIC field applies (review DRC-7):
-            # overlapping same-layer pours emit the shared cells once per
-            # zone, and the initial registration lexsorts to per-cell max --
-            # a refresh that just vstacks re-introduces the duplicates, so a
-            # cost consumer that sums rows double-charges overlap cells
-            # relative to the static field.
-            # Sort order is (layer, gx, gy, cost, original index). Packing the
-            # four columns into one offset int64 key lets a single stable
-            # (radix) argsort produce the identical permutation the 4-key
-            # lexsort did, at a fraction of the cost; the lexsort fallback
-            # covers a grid so large the packing would overflow.
-            o64 = out.astype(np.int64)
-            mins = o64.min(axis=0)
-            spans = o64.max(axis=0) - mins + 1
-            if int(spans[0]) * int(spans[1]) * int(spans[2]) * int(spans[3]) < (1 << 62):
-                cell_key = ((o64[:, 0] - mins[0]) * spans[1]
-                            + (o64[:, 1] - mins[1])) * spans[2] + (o64[:, 2] - mins[2])
-                order = np.argsort(cell_key * spans[3] + (o64[:, 3] - mins[3]),
-                                   kind='stable')
-                out = out[order]
-                same = np.diff(cell_key[order]) == 0
+    @staticmethod
+    def _merge(rows):
+        """Rows of overlapping pours -> one row per cell, the max cost, sorted (layer, gx, gy): the dedup the
+        STATIC field applies (review DRC-7)."""
+        out = np.vstack(rows) if len(rows) > 1 else rows[0]
+        # Same max-cost dedup the STATIC field applies (review DRC-7):
+        # overlapping same-layer pours emit the shared cells once per
+        # zone, and the initial registration lexsorts to per-cell max --
+        # a refresh that just vstacks re-introduces the duplicates, so a
+        # cost consumer that sums rows double-charges overlap cells
+        # relative to the static field.
+        # Sort order is (layer, gx, gy, cost, original index). Packing the
+        # four columns into one offset int64 key lets a single stable
+        # (radix) argsort produce the identical permutation the 4-key
+        # lexsort did, at a fraction of the cost; the lexsort fallback
+        # covers a grid so large the packing would overflow.
+        o64 = out.astype(np.int64)
+        mins = o64.min(axis=0)
+        spans = o64.max(axis=0) - mins + 1
+        if int(spans[0]) * int(spans[1]) * int(spans[2]) * int(spans[3]) < (1 << 62):
+            cell_key = ((o64[:, 0] - mins[0]) * spans[1]
+                        + (o64[:, 1] - mins[1])) * spans[2] + (o64[:, 2] - mins[2])
+            order = np.argsort(cell_key * spans[3] + (o64[:, 3] - mins[3]),
+                               kind='stable')
+            out = out[order]
+            same = np.diff(cell_key[order]) == 0
+        else:
+            order = np.lexsort((out[:, 3], out[:, 2], out[:, 1], out[:, 0]))
+            out = out[order]
+            same = ((np.diff(out[:, 0]) == 0) & (np.diff(out[:, 1]) == 0)
+                    & (np.diff(out[:, 2]) == 0))
+        keep = np.ones(len(out), dtype=bool)
+        keep[:-1][same] = False   # sort put max cost last per cell
+        return out[keep]
+
+    def publish(self, dirty=None):
+        """Publish the merged rows. Per layer (2026-11-08): rows of different layers never dedup against each
+        other and the merge sorts layer first, so the merge of every layer is the merges of each layer
+        concatenated in layer order -- and a refresh re-merges only the layers it changed (`dirty`; None = all).
+        Was one whole-board sort per copper change: cm5io ~20 s of its route stage."""
+        memo = getattr(self, '_layer_merged', None)
+        if memo is None or dirty is None:
+            memo = self._layer_merged = {}
+            dirty = {st.li for st in self.states}
+        for li in dirty:
+            rows = [st.rows for st in self.states if st.li == li and st.rows is not None]
+            if rows:
+                memo[li] = self._merge(rows)
             else:
-                order = np.lexsort((out[:, 3], out[:, 2], out[:, 1], out[:, 0]))
-                out = out[order]
-                same = ((np.diff(out[:, 0]) == 0) & (np.diff(out[:, 1]) == 0)
-                        & (np.diff(out[:, 2]) == 0))
-            keep = np.ones(len(out), dtype=bool)
-            keep[:-1][same] = False   # sort put max cost last per cell
-            self.cache[PLANE_FRAGILITY_CACHE_KEY] = out[keep]
+                memo.pop(li, None)
+        parts = [memo[li] for li in sorted(memo)]
+        if parts:
+            self.cache[PLANE_FRAGILITY_CACHE_KEY] = np.concatenate(parts)   # a fresh array, as before
         else:
             self.cache.pop(PLANE_FRAGILITY_CACHE_KEY, None)
 
