@@ -417,6 +417,11 @@ def route_negotiated(state, single_ended_nets: List[Tuple[str, int]], cancel_che
     x0, y0, w, h = grid_bounds(pcb_data, coord)
 
     picked, rest, origs, terms_of = [], [], [], []
+    # with plane taps on, a plane net (a zone on a forbidden layer) is tapped pad by pad, never routed as a tree
+    plane_nets = set()
+    if tap_mode:
+        plane_nets = {z.net_id for z in (getattr(pcb_data, 'zones', None) or [])
+                      if z.layer in layer_map and forbidden[layer_map[z.layer]]}
     max_terms = _env_num('KRT_NEGOTIATED_MAX_TERMINALS', 32, int)
     # Global-plan corridors (trial, 2026-11-08): KRT_CORRIDORS names a JSON file {net name: [[x0, y0, x1, y1,
     # [z...]], ...]} in board mm, z = copper index top to bottom (tscircuit's capacity-mesh nodes each net's
@@ -434,7 +439,7 @@ def route_negotiated(state, single_ended_nets: List[Tuple[str, int]], cancel_che
     tw = config.track_width
     t_terms = 0.0
     for name, nid in single_ended_nets:
-        if nid in olinks:
+        if nid in olinks or nid in plane_nets:
             rest.append((name, nid))
             continue
         t0_terms = time.perf_counter()
