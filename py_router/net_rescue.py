@@ -1299,6 +1299,51 @@ def rescue_candidates(pcb_data, routed_results, single_ended_nets):
             # rescue took before see the board they saw then.
             restores.append((net_name, net_id, 'partial'))
     return candidates + restores
+# net name -> digest of the copper around the net when its rescue last failed. A process keeps it across the
+# reconciliation sub-runs and their progress-loop laps (each re-parses the board), so a net whose rescue failed
+# is not re-rescued until copper near it changed: cm5io 2026-11-08 spent 34 + 50 + 47 s re-rescuing the same
+# 12 nets lap after lap, the last lap recovering and improving nothing. KICAD_RESCUE_MEMO=0 turns it off.
+_RESCUE_MEMO = {}
+
+
+def _rescue_digest(pcb_data, net_id):
+    """Hashable state a rescue of net_id depends on: every pad, segment and via (any net) inside the net's
+    bounding box grown by the largest rescue window reach (RESCUE_WINDOW_MARGIN + RESCUE_MIN_WINDOW_HALF), keyed by
+    net NAME (ids are re-assigned per parse), plus each zone's net, layer and outline."""
+    pads = pcb_data.pads_by_net.get(net_id, [])
+    xs = [p.global_x for p in pads]
+    ys = [p.global_y for p in pads]
+    for sg in pcb_data.segments:
+        if sg.net_id == net_id:
+            xs += [sg.start_x, sg.end_x]
+            ys += [sg.start_y, sg.end_y]
+    for v in pcb_data.vias:
+        if v.net_id == net_id:
+            xs.append(v.x)
+            ys.append(v.y)
+    if not xs:
+        return None
+    m = defaults.RESCUE_WINDOW_MARGIN + defaults.RESCUE_MIN_WINDOW_HALF
+    x0, x1, y0, y1 = min(xs) - m, max(xs) + m, min(ys) - m, max(ys) + m
+
+    def name(nid):
+        n = pcb_data.nets.get(nid)
+        return getattr(n, 'name', str(nid)) if n is not None else str(nid)
+
+    r = lambda v: round(v, 4)
+    segs = sorted((name(sg.net_id), sg.layer, r(sg.width), *sorted([(r(sg.start_x), r(sg.start_y)),
+                                                                    (r(sg.end_x), r(sg.end_y))]))
+                  for sg in pcb_data.segments
+                  if max(sg.start_x, sg.end_x) >= x0 and min(sg.start_x, sg.end_x) <= x1
+                  and max(sg.start_y, sg.end_y) >= y0 and min(sg.start_y, sg.end_y) <= y1)
+    vias = sorted((name(v.net_id), r(v.x), r(v.y), r(v.size), r(v.drill), tuple(v.layers))
+                  for v in pcb_data.vias if x0 <= v.x <= x1 and y0 <= v.y <= y1)
+    pad_rows = sorted((name(p.net_id), p.component_ref, p.pad_number, r(p.global_x), r(p.global_y))
+                      for ps in pcb_data.pads_by_net.values() for p in ps
+                      if x0 <= p.global_x <= x1 and y0 <= p.global_y <= y1)
+    zones = sorted((name(z.net_id), z.layer, tuple((r(x), r(y)) for x, y in z.polygon))
+                   for z in getattr(pcb_data, 'zones', None) or [])
+    return hash((tuple(segs), tuple(vias), tuple(pad_rows), tuple(zones)))
 
 
 def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
@@ -1356,6 +1401,28 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
         if num0 <= 1:
             # Checker says connected (zone credit etc.) - nothing to rescue,
             # and accounting stays whatever the run already decided.
+            continue
+        _memo_on = os.environ.get('KICAD_RESCUE_MEMO', '1') != '0'
+        _digest = _rescue_digest(pcb_data, net_id) if _memo_on else None
+        if _digest is not None:
+            # the rules the rescue runs under are part of the key: a lap at another grid, clearance, width, via
+            # or layer set (or another fab tier / per-net clearance) is a new attempt
+            import fab_tiers as _ft
+            _pol = (_ft._DEFAULT_TIER, repr(sorted((_ft._DEFAULT_OVERRIDES or {}).items())), _ft._ESCALATION,
+                    repr(sorted((_ft._BOARD_FLOORS or {}).items())), _ft._HOLE_CLEARANCE,
+                    _ft._BOARD_RULE_CLEARANCE, _ft._WRITEBACK,
+                    repr(sorted(_ft._RULE_VIA_FLOORS.items())))
+            _digest = hash((_digest, config.grid_step, config.clearance, config.track_width, config.via_size,
+                            config.via_drill, tuple(config.layers),
+                            getattr(config, 'same_net_pad_clearance', None),
+                            getattr(config, 'hole_clearance', None),
+                            tuple(sorted((net_clearances or {}).items())),
+                            _pol))
+        if _digest is not None and _RESCUE_MEMO.get(net_name) == _digest:
+            summary['unchanged'].append(net_name)
+            record_net_event(state, net_id, "rescue_failed",
+                             {"components": num0, "memo": True, "time_s": 0.0})
+            print(f"  Rescue of {net_name} skipped: failed before against the same copper (memo)")
             continue
         summary['attempted'] += 1
         print(f"  Rescuing {net_name} ({kind}, {num0} disconnected parts)")
@@ -1836,6 +1903,8 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                           f"queued for post-write (#666)")
         elapsed = time.time() - net_start
         if not edge_results and not tap_results:
+            if _digest is not None:
+                _RESCUE_MEMO[net_name] = _digest   # a failed rescue adds no copper: the digest still holds
             summary['unchanged'].append(net_name)
             record_net_event(state, net_id, "rescue_failed",
                              {"components": num0, "attempts": attempts,
@@ -2001,12 +2070,12 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
               f"({num0} -> {num} parts, {elapsed:.1f}s{_thin})")
 
     summary['time'] = round(time.time() - pass_start, 2)
-    if summary['attempted']:
+    if summary['attempted'] or summary['unchanged']:
         print(f"Rescue pass: {len(summary['recovered'])} recovered, "
               f"{len(summary['improved'])} improved, "
               f"{len(summary['unchanged'])} unchanged "
               f"({summary['time']:.1f}s)")
-    return summary if summary['attempted'] else None
+    return summary if (summary['attempted'] or summary['unchanged']) else None
 
 
 # ---------------------------------------------------------------------------
