@@ -1249,7 +1249,46 @@ impl NegotiatedRouter {
             todo = conflicted;
         }
         // legalize: drop the most conflicted net until no conflict remains (KRT_NEGOTIATED_DUMP defers it)
-        let dropped = if self.defer_legalise { Vec::new() } else { self.legalise_inner() };
+        let mut dropped = if self.defer_legalise { Vec::new() } else { self.legalise_inner() };
+        // recovery: each dropped net searched once more against the legal board (occupied cells all but forbidden),
+        // kept only when it crosses nothing; KRT_NEGOTIATED_RECOVER=0 turns it off
+        let recover = std::env::var("KRT_NEGOTIATED_RECOVER").map_or(true, |v| v != "0");
+        if recover && !dropped.is_empty() {
+            let rt = Instant::now();
+            let idx: Vec<usize> = (0..n).filter(|&i| self.routes[i].is_none() && !self.unroutable[i]
+                                                && dropped.contains(&self.nets[i].net_id)).collect();
+            let me: &Self = self;
+            let found: Vec<(usize, Option<Vec<Vec<(i32, i32, u8)>>>, u64)> = py.allow_threads(|| {
+                pool.install(|| idx.par_iter().map(|&ni| {
+                    let (p, e) = me.route_net(ni, 1.0e4);
+                    (ni, p, e)
+                }).collect())
+            });
+            let mut back = 0usize;
+            for (ni, p, e) in found {
+                total_exp += e;
+                searches += 1;
+                if let Some(paths) = p {
+                    if self.foreign_hits(&paths, &self.nets[ni]) > 0 {
+                        continue;
+                    }
+                    let r = self.paint(&paths, &self.nets[ni], &dvv);
+                    let (ct, cv) = self.conflicts(&r, &self.nets[ni]);
+                    if ct.is_empty() && cv.is_empty() {
+                        let id = self.nets[ni].net_id;
+                        dropped.retain(|&d| d != id);
+                        self.routes[ni] = Some(r);
+                        back += 1;
+                    } else {
+                        self.unpaint(&r);
+                    }
+                }
+            }
+            let line = format!("recovery: {back} of {} dropped nets routed against the legal board, {:.2} s",
+                               idx.len(), rt.elapsed().as_secs_f64());
+            eprintln!("  negotiated {line}");
+            self.log.push(line);
+        }
         let d = PyDict::new(py);
         d.set_item("passes", iters)?;
         d.set_item("stopped", stopped)?;
