@@ -966,3 +966,50 @@ def verify_board_file_parity(pcb_data, scope_net_ids, orig_seg_by_net, results,
         print(f"[BOARD_LEDGER]{label} OK: pcb_data == write model for all "
               f"{len(scope)} in-scope net(s)")
     return bad == 0
+
+# --- KRT_CLEANUP_SNAPSHOT=<dir>: pickle every run_post_route_cleanup call's inputs (and the copper it left) so
+# the cleanup can be replayed alone (scripts/replay_cleanup.py): iterate on its speed in a minute, not a full route.
+import os as _os_snap
+if _os_snap.environ.get('KRT_CLEANUP_SNAPSHOT'):
+    _run_post_route_cleanup_inner = run_post_route_cleanup
+    _snap_n = [0]
+
+    def run_post_route_cleanup(results, pcb_data, scope_net_ids, config, **kw):  # noqa: F811
+        import pickle, time
+        d = _os_snap.environ['KRT_CLEANUP_SNAPSHOT']
+        _os_snap.makedirs(d, exist_ok=True)
+        _snap_n[0] += 1
+        n = _snap_n[0]
+        keep = {k: v for k, v in kw.items() if not callable(v)}
+        # id() sets mean nothing after unpickling: store list positions instead
+        for _k, _lst in (('original_segment_ids', pcb_data.segments), ('original_via_ids', pcb_data.vias)):
+            if keep.get(_k) is not None:
+                _ids = keep[_k]
+                keep[_k] = ('__positions__', [i for i, o in enumerate(_lst) if id(o) in _ids])
+        path = _os_snap.path.join(d, f'cleanup-{n:03d}-{kw.get("label") or "run"}.pkl'.replace('/', '_'))
+        import copy
+        pd = copy.copy(pcb_data)
+        stripped = []
+        for _k, _v in list(vars(pd).items()):
+            try:
+                pickle.dumps(_v, protocol=pickle.HIGHEST_PROTOCOL)
+            except Exception:  # noqa: BLE001
+                delattr(pd, _k)
+                stripped.append(_k)
+        if stripped:
+            print(f'  [cleanup snapshot] dropped unpicklable pcb_data attrs: {stripped}')
+        try:
+            with open(path, 'wb') as f:
+                pickle.dump({'stripped': stripped, 'results': results, 'pcb_data': pd, 'scope_net_ids': scope_net_ids,
+                             'config': config, 'kw': keep, 'dropped': sorted(set(kw) - set(keep))}, f,
+                            protocol=pickle.HIGHEST_PROTOCOL)
+        except Exception as e:  # noqa: BLE001
+            print(f'  [cleanup snapshot] {path}: not picklable ({type(e).__name__}: {e})')
+            path = None
+        t0 = time.time()
+        out = _run_post_route_cleanup_inner(results, pcb_data, scope_net_ids, config, **kw)
+        if path:
+            from replay_digest import copper_digest
+            with open(path + '.out', 'w', encoding='utf-8') as f:
+                f.write(f'{time.time() - t0:.3f} {copper_digest(pcb_data, results)}' + chr(10))
+        return out
