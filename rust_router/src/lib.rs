@@ -16,10 +16,12 @@ mod obstacle_map;
 mod router;
 mod dubins;
 mod pose_router;
+mod pathfinder;
 
 pub use obstacle_map::GridObstacleMap;
 pub use router::GridRouter;
 pub use pose_router::PoseRouter;
+pub use pathfinder::NegotiatedRouter;
 
 /// Identify which nets' copper overlaps a set of blocked grid cells, returning
 /// net_id -> count (how many of the net's segments/vias/pads touch the blocked
@@ -143,6 +145,7 @@ fn grid_router(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<GridObstacleMap>()?;
     m.add_class::<GridRouter>()?;
     m.add_class::<PoseRouter>()?;
+    m.add_class::<NegotiatedRouter>()?;
     m.add_function(wrap_pyfunction!(identify_blocking_obstacles, m)?)?;
     Ok(())
 }

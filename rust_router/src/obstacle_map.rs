@@ -1118,6 +1118,29 @@ impl GridObstacleMap {
         false
     }
 
+    /// The copper / static keep-out part of `is_blocked` alone: no BGA-zone test and no source/target override.
+    /// The negotiated router applies its own per-net zone windows on top (`in_bga_zone`).
+    #[inline]
+    pub fn is_blocked_hard(&self, gx: i32, gy: i32, layer: usize) -> bool {
+        layer >= self.num_layers
+            || self.blocked_bitmap.test(gx, gy, layer)
+            || self.static_blocked_bitmap.test(gx, gy, layer)
+    }
+
+    /// The copper / static part of `is_via_blocked` alone (no BGA-zone test).
+    #[inline]
+    pub fn is_via_blocked_hard(&self, gx: i32, gy: i32) -> bool {
+        self.blocked_vias.contains_key(&pack_xy(gx, gy)) || self.static_via_bitmap.test(gx, gy, 0)
+    }
+
+    /// Inside one of the BGA exclusion zones (tracks and vias blocked on every layer unless allowed).
+    #[inline]
+    pub fn in_bga_zone(&self, gx: i32, gy: i32) -> bool {
+        self.bga_zones.iter().any(|(min_gx, min_gy, max_gx, max_gy)| {
+            gx >= *min_gx && gx <= *max_gx && gy >= *min_gy && gy <= *max_gy
+        })
+    }
+
     /// Check if cell is blocked with extra margin (for wide tracks)
     /// Checks all cells within margin radius - if any is blocked, returns true.
     /// This is O(margin^2) so only use for wide power tracks.
