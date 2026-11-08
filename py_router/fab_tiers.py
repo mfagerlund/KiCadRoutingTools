@@ -878,7 +878,7 @@ def add_fab_tier_args(parser, *, include_escalation=True):
                  "DRC accepts. 'fab': down to the fab tier floor, below the board's "
                  "own minimums. Every descent is counted in JSON_SUMMARY design_rules.")
         parser.add_argument(
-            '--hole-clearance', type=float, default=_hole_clearance_default(), metavar='MM',
+            '--rung-hole-clearance', type=float, default=_hole_clearance_default(), metavar='MM',
             help="The board's copper-to-hole floor (Board Setup min_hole_clearance). Every via rung a "
                  "descent may use is raised to via_drill + 2 * (MM - clearance), so foreign copper at the "
                  "rung's clearance from the via ring still clears the hole by MM. Default: "
@@ -997,5 +997,5 @@ def set_policy_from_args(args, pcb_path=None):
         floors = drop_stale_board_floors(
             floors, {k: getattr(args, k, None) for k in _REQUEST_FLOOR_KEY})
     set_escalation_policy(policy, floors)
-    set_hole_clearance(getattr(args, 'hole_clearance', None) or _hole_clearance_default())
+    set_hole_clearance(getattr(args, 'rung_hole_clearance', None) or _hole_clearance_default())
     return floors
