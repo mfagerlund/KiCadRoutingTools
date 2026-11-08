@@ -294,6 +294,43 @@ def kicad_python_candidates() -> List[str]:
 _KICAD_PYTHON_MEMO: List[Optional[str]] = []
 
 
+def _probe_key(cand: str) -> Optional[str]:
+    """A passed pcbnew probe's identity: the interpreter's path, size and mtime (a KiCad update is a miss)."""
+    try:
+        st = os.stat(cand)
+    except OSError:
+        return None
+    return f'{os.path.normcase(os.path.abspath(cand))}|{st.st_size}|{st.st_mtime_ns}'
+
+
+def _probe_file() -> str:
+    return os.path.join(tempfile.gettempdir(), 'krt-kicad-python-ok.txt')
+
+
+def _probe_remembered(cand: str) -> bool:
+    """True when an earlier process's `import pcbnew` probe passed for this exact interpreter file
+    (KRT_KICAD_PYTHON_PROBE=always re-probes)."""
+    if os.environ.get('KRT_KICAD_PYTHON_PROBE') == 'always':
+        return False
+    key = _probe_key(cand)
+    try:
+        with open(_probe_file(), encoding='utf-8') as f:
+            return key is not None and key in f.read().splitlines()
+    except OSError:
+        return False
+
+
+def _remember_probe(cand: str) -> None:
+    key = _probe_key(cand)
+    if key is None:
+        return
+    try:
+        with open(_probe_file(), 'a', encoding='utf-8') as f:
+            f.write(key + '\n')
+    except OSError:
+        pass
+
+
 def find_kicad_python() -> Optional[str]:
     """Path of a python that can import pcbnew, or None.
 
@@ -310,6 +347,11 @@ def find_kicad_python() -> Optional[str]:
     """
     if _KICAD_PYTHON_MEMO:
         return _KICAD_PYTHON_MEMO[0]
+    env_py = os.environ.get('KICAD_PYTHON')
+    if env_py and os.path.isfile(env_py) and _probe_remembered(env_py):
+        # the first candidate, proven by an earlier process: no install-root scan, no probe
+        _KICAD_PYTHON_MEMO.append(env_py)
+        return env_py
     found = None
     for cand in kicad_python_candidates():
         # The free settle: this IS the running interpreter and pcbnew is
@@ -322,10 +364,14 @@ def find_kicad_python() -> Optional[str]:
             break
         if not os.path.isfile(cand):
             continue
+        if _probe_remembered(cand):
+            found = cand
+            break
         try:
             if subprocess.run([cand, '-c', 'import pcbnew'],
                               capture_output=True, timeout=120).returncode == 0:
                 found = cand
+                _remember_probe(cand)
                 break
         except Exception:
             continue
