@@ -6888,6 +6888,28 @@ def _seg_worst_offender(pcb_data, net_id, s, clearance, net_clearances=None,
     return (shortfall, t, (px - qx) / norm, (py - qy) / norm)
 
 
+def _trusted_foreign_seg_cache(fn):
+    """Run a graze pass with the foreign-segment cache TRUSTED (see _foreign_seg_arrays): the pass edits
+    copper only by splicing pcb_data.segments (a new list) or moving a via in place, and drops
+    _foreign_seg_arr_cache after every such edit, so the per-query O(segments) digest only re-proves a cache
+    that cannot be stale. cm5io 2026-11-08: grazes() and copper_flagged() spent ~35 s of a 950 s route stage
+    on that digest. The flag and the cache are reset on every exit path."""
+    import functools
+
+    @functools.wraps(fn)
+    def run(results, pcb_data, *args, **kwargs):
+        prev = getattr(pcb_data, '_foreign_seg_arr_trust', False)
+        pcb_data._foreign_seg_arr_cache = None
+        pcb_data._foreign_seg_arr_trust = True
+        try:
+            return fn(results, pcb_data, *args, **kwargs)
+        finally:
+            pcb_data._foreign_seg_arr_trust = prev
+            pcb_data._foreign_seg_arr_cache = None
+    return run
+
+
+@_trusted_foreign_seg_cache
 def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
                              clearance: float = 0.1,
                              max_shift: float = 0.025,
@@ -7307,6 +7329,7 @@ def nudge_grazing_microshift(results, pcb_data: PCBData, scope_net_ids=None,
             nets_changed, original_to_remove, added_segments)
 
 
+@_trusted_foreign_seg_cache
 def nudge_grazing_vias(results, pcb_data: PCBData, scope_net_ids=None,
                        clearance: float = 0.1, hole_to_hole: float = 0.20,
                        max_shift: float = 0.025,
