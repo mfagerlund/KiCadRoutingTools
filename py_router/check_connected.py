@@ -143,13 +143,32 @@ class SegmentIndex:
         self.grid = defaultdict(list)  # (gx, gy, layer) -> list of (seg, seg_start_id)
 
     def _cells_for_segment(self, seg) -> List[Tuple[int, int]]:
-        """Return all grid cells that a segment passes through."""
+        """Return the grid cells a segment's centreline passes through, column by column (gx, then gy, as the
+        bounding box enumerated them). Every query of this index tests exact distance to the centreline and
+        rings the query cell out to its reach, so the cells the line touches are all it needs. The bounding box
+        was a superset that cost (len/cell)^2 cells for a diagonal: on cm5io 2026-11-08 a 0.1 mm cell put
+        ~10,000 cells under a 20 mm 45-degree track and SegmentIndex.add was 60 s of a 950 s route stage.
+        Each column's y-span is widened by EPS so a line exactly on a cell edge keeps both cells."""
+        cs = self.cell_size
         x1, y1, x2, y2 = seg.start_x, seg.start_y, seg.end_x, seg.end_y
-        gx1, gy1 = int(min(x1, x2) // self.cell_size), int(min(y1, y2) // self.cell_size)
-        gx2, gy2 = int(max(x1, x2) // self.cell_size), int(max(y1, y2) // self.cell_size)
+        if x1 > x2:
+            x1, y1, x2, y2 = x2, y2, x1, y1
+        gx1, gx2 = int(x1 // cs), int(x2 // cs)
+        ylo, yhi = min(y1, y2), max(y1, y2)
+        gy_lo, gy_hi = int(ylo // cs), int(yhi // cs)
+        if gx1 == gx2 or gy_lo == gy_hi:
+            return [(gx, gy) for gx in range(gx1, gx2 + 1) for gy in range(gy_lo, gy_hi + 1)]
+        EPS = 1e-9
+        slope = (y2 - y1) / (x2 - x1)
         cells = []
         for gx in range(gx1, gx2 + 1):
-            for gy in range(gy1, gy2 + 1):
+            xa = max(x1, gx * cs)
+            xb = min(x2, (gx + 1) * cs)
+            ya = y1 + (xa - x1) * slope
+            yb = y1 + (xb - x1) * slope
+            a = max(gy_lo, int((min(ya, yb) - EPS) // cs))
+            b = min(gy_hi, int((max(ya, yb) + EPS) // cs))
+            for gy in range(a, b + 1):
                 cells.append((gx, gy))
         return cells
 
