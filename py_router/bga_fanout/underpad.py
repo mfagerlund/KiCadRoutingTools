@@ -513,6 +513,35 @@ def _segments_from_cells(occ, cells):
     return out
 
 
+# The foreign-track stamps of an escape grid, per layer, keyed on the exact rows stamped and the grid's frame
+# (2026-11-08): the rescue ladders call the escape for the same footprint and window over and over (each net,
+# each rung, the under-pad shrink retry) with the board's tracks unchanged in between, and re-stamping every
+# track in the region was ~40 s of cm5io's 950 s route stage. block_segment only SETS cells, so OR-ing a cached
+# stamp of the same rows into the grid is the identical grid.
+_SEG_STAMP_MEMO = {}
+
+
+def _stamp_segments_memo(occ, rows):
+    import numpy as np
+    if not rows:
+        return
+    key = (occ.x0, occ.y0, occ.x1, occ.y1, occ.res, occ.nl, occ.nx, occ.ny, tuple(rows))
+    hit = _SEG_STAMP_MEMO.get(key)
+    if hit is None:
+        tmp = type(occ)((occ.x0, occ.y0, occ.x1, occ.y1), occ.res, occ.layers)
+        assert (tmp.nx, tmp.ny) == (occ.nx, occ.ny)
+        for li, ax, ay, bx, by, r in rows:
+            tmp.block_segment(li, (ax, ay), (bx, by), r)
+        hit = [np.frombuffer(bytes(g), dtype=np.uint8) if any(g) else None for g in tmp.grid]
+        if len(_SEG_STAMP_MEMO) >= 16:
+            _SEG_STAMP_MEMO.pop(next(iter(_SEG_STAMP_MEMO)))
+        _SEG_STAMP_MEMO[key] = hit
+    for g, m in zip(occ.grid, hit):
+        if m is not None:
+            a = np.frombuffer(g, dtype=np.uint8)
+            np.bitwise_or(a, m, out=a)
+
+
 def generate_underpad_escape(footprint: Footprint,
                              pcb_data: PCBData,
                              grid: BGAGrid,
@@ -930,6 +959,7 @@ def generate_underpad_escape(footprint: Footprint,
             carve_disks.append((v.x, v.y, vkeep_v, None, v.net_id))
     layer_set = set(layers)
     route_net_ids = {p.net_id for p in signal_pads}
+    _seg_rows = []
     for s in pcb_data.segments:
         if s.layer not in layer_set:
             continue
@@ -943,10 +973,11 @@ def generate_underpad_escape(footprint: Footprint,
             # copper every extra (own net included) must route clear of.
             continue
         li = layers.index(s.layer)
-        occ.block_segment(li, (s.start_x, s.start_y), (s.end_x, s.end_y),
-                          s.width / 2 + track_width / 2 + clearance)
+        _seg_rows.append((li, s.start_x, s.start_y, s.end_x, s.end_y,
+                          s.width / 2 + track_width / 2 + clearance))
         exact_segs.append((s.start_x, s.start_y, s.end_x, s.end_y,
                            (s.width or 0.0) / 2.0, s.net_id, li))
+    _stamp_segments_memo(occ, _seg_rows)
 
     # IMMOVABLE foreign components' pads in the region (locked parts,
     # connectors, test points -- anything place_fanout_clearance will not
