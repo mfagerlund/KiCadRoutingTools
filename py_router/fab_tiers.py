@@ -736,6 +736,43 @@ def _first_choice_meets(rungs, floors):
     return first + [r for r in rungs if r['via_diameter'] < first[0]['via_diameter'] - 1e-9]
 
 
+_HOLE_CLEARANCE = None
+
+
+def set_hole_clearance(mm):
+    """The board's copper-to-hole floor (Board Setup min_hole_clearance), or None. Every via rung then keeps it
+    against a neighbour at the rung's clearance: a router keeps foreign copper off a via by copper clearance from
+    its ring, so copper to hole is (via - drill) / 2 + clearance, and a 0.45/0.2 rung at 0.1 mm gives 0.225 mm
+    under a 0.25 mm floor (scalenode-cm4 2026-11-08: 38 of 41 hole_clearance errors on escalated vias)."""
+    global _HOLE_CLEARANCE
+    _HOLE_CLEARANCE = float(mm) if mm else None
+
+
+def _hole_clearance_default():
+    """KICAD_HOLE_CLEARANCE in mm, or None (unset, empty, zero or unreadable)."""
+    try:
+        v = float(os.environ.get('KICAD_HOLE_CLEARANCE') or 0)
+    except ValueError:
+        return None
+    return v if v > 0 else None
+
+
+def _apply_hole_clearance(rungs):
+    """Raise each rung's via diameter to via_drill + 2 * (hole clearance - clearance); collapse duplicates."""
+    if not _HOLE_CLEARANCE:
+        return rungs
+    out = []
+    for r in rungs:
+        rr = dict(r)
+        if rr.get('via_diameter') is not None and rr.get('via_drill') is not None:
+            need = round(rr['via_drill'] + 2 * (_HOLE_CLEARANCE - (rr.get('clearance') or 0.0)), 4)
+            if rr['via_diameter'] < need - 1e-9:
+                rr['via_diameter'] = need
+        if not out or rr != out[-1]:
+            out.append(rr)
+    return out
+
+
 def fab_floor_ladder(copper_layer_count, tier=None, overrides=None):
     """Ordered list of floor dicts for the tier under the active escalation
     policy: the nominal (preferred) floor first, then any escalation rungs
@@ -758,7 +795,7 @@ def fab_floor_ladder(copper_layer_count, tier=None, overrides=None):
     rungs = _tier_rungs(copper_layer_count, tier, overrides)
     if _ESCALATION == 'board':
         rungs = _apply_board_floors(rungs)
-    return rungs
+    return _apply_hole_clearance(rungs)
 
 
 def escalation_rungs(copper_layer_count, tier=None, overrides=None,
@@ -790,6 +827,9 @@ def escalation_rungs(copper_layer_count, tier=None, overrides=None,
     if want and rungs:
         rungs = (_apply_board_floors(rungs, want) if _ESCALATION == 'board'
                  else _first_choice_meets(rungs, want))
+    # fork: every rung keeps the board's copper-to-hole floor (after the
+    # per-net and rule floors, which may have lowered the ring's clearance).
+    rungs = _apply_hole_clearance(rungs)
     return rungs
 
 
@@ -1542,6 +1582,13 @@ def add_fab_tier_args(parser, *, include_escalation=True):
                  "the fab tier floor, below the board's own minimums. Every "
                  "descent is counted in JSON_SUMMARY design_rules.")
         parser.add_argument(
+            '--hole-clearance', type=float, default=_hole_clearance_default(), metavar='MM',
+            help="The board's copper-to-hole floor (Board Setup min_hole_clearance). Every via rung a "
+                 "descent may use is raised to via_drill + 2 * (MM - clearance), so foreign copper at the "
+                 "rung's clearance from the via ring still clears the hole by MM. Default: "
+                 "KICAD_HOLE_CLEARANCE (route-board sets it to the board's value for every child), "
+                 "else not applied.")
+        parser.add_argument(
             '--clearance-ceiling', type=float, default=None, metavar='MM',
             help="Cap EVERY net class (Default included) at this copper clearance for "
                  "the run and clamp the output project's classes down to it -- the "
@@ -1708,6 +1755,7 @@ def set_policy_from_args(args, pcb_path=None):
                        if pcb_path and policy == 'board' and not writeback
                        else None))
     set_escalation_policy(policy, floors, writeback=writeback)
+    set_hole_clearance(getattr(args, 'hole_clearance', None) or _hole_clearance_default())
     return floors
 
 
