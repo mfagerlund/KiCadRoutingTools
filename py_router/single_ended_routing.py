@@ -491,6 +491,39 @@ def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
         cx_ = _coupled_excess(config, net_id, nids[near], 'pad', base_clearance, layer)
         excess = _fold_scoped_excess(
             excess, np.where(plc[near] > 0, np.nan, cx_))
+    if fcx.size > 4 and sx.size > 4:
+        # Exact prune (2026-11-08, pico-vga's smoothing spent 2.4 s here): a
+        # pad's rounded rect lies within hypot(hx-r, hy-r) + r of its centre
+        # (inner extents floored at 0), so the segment-to-centre distance
+        # minus that radius (minus its excess) is
+        # a lower bound on every sampled distance to it. Evaluate the pad of
+        # least bound in full; a pad whose bound exceeds that pad's sampled
+        # minimum cannot hold the minimum, so the result is unchanged.
+        vx, vy = x2 - x1, y2 - y1
+        L2 = vx * vx + vy * vy
+        if L2 > 0.0:
+            t = np.clip(((fcx - x1) * vx + (fcy - y1) * vy) / L2, 0.0, 1.0)
+            lb = np.hypot(fcx - (x1 + t * vx), fcy - (y1 + t * vy))
+        else:
+            lb = np.hypot(fcx - x1, fcy - y1)
+        lb = lb - (np.hypot(np.maximum(fhx - fcr, 0.0), np.maximum(fhy - fcr, 0.0)) + fcr)
+        if excess is not None:
+            lb = lb - excess
+        j = int(np.argmin(lb))
+        ddx = sx - fcx[j]
+        ddy = sy - fcy[j]
+        lx = np.abs(ddx * frc[j] + ddy * frs[j])
+        ly = np.abs(-ddx * frs[j] + ddy * frc[j])
+        dj = np.hypot(np.maximum(lx - (fhx[j] - fcr[j]), 0.0),
+                      np.maximum(ly - (fhy[j] - fcr[j]), 0.0)) - fcr[j]
+        if excess is not None:
+            dj = dj - excess[j]
+        keep = lb <= float(np.min(dj)) + 1e-9
+        keep[j] = True
+        fcx, fcy, fhx, fhy, fcr = fcx[keep], fcy[keep], fhx[keep], fhy[keep], fcr[keep]
+        frc, frs = frc[keep], frs[keep]
+        if excess is not None:
+            excess = excess[keep]
     # Rounded-rect signed distance in each pad's LOCAL frame (query offsets
     # rotated by R(-rot); identity for axis-aligned pads): shrink the
     # half-extents by the corner radius, take the outside distance to that
