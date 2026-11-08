@@ -69,6 +69,8 @@ struct Net {
     dtv: Vec<(i32, i32)>,          // its via-block paint disk: r_tv + extra
     ext: Vec<(i32, i32)>,          // the extra-margin disk its own centreline must keep clear (empty: none)
     own_vias: Vec<(i32, i32)>,     // the net's existing vias: new vias keep r_vv from them
+    corridor: Vec<(i32, i32, i32, i32, u32)>, // global-plan corridor: cell rects x0, y0, x1, y1 and a layer bit mask
+    cfac: f32,                     // cost factor on cells outside the corridor (1: no corridor)
 }
 
 #[derive(Clone, Default)]
@@ -308,6 +310,35 @@ impl NegotiatedRouter {
         for &(vx, vy) in &net.own_vias {
             Self::mark_via_disk(&mut vmask, &win, ww, &dvv, vx, vy);
         }
+        // global-plan corridor: 1 on the cells (per layer) the net's corridor covers; a step or via landing outside
+        // costs cfac times as much, so the search keeps to the plan unless leaving it is cheaper
+        let cmask: Option<Vec<bool>> = if net.corridor.is_empty() || net.cfac <= 1.0 { None } else {
+            let mut m = vec![false; total];
+            for &(rx0, ry0, rx1, ry1, lm) in &net.corridor {
+                let (ax0, ay0) = (rx0.max(win.x0), ry0.max(win.y0));
+                let (ax1, ay1) = (rx1.min(win.x1), ry1.min(win.y1));
+                if ax0 > ax1 || ay0 > ay1 {
+                    continue;
+                }
+                for l in 0..nl {
+                    if lm & (1u32 << l) == 0 {
+                        continue;
+                    }
+                    for y in ay0..=ay1 {
+                        for x in ax0..=ax1 {
+                            m[lidx(x, y, l as u8)] = true;
+                        }
+                    }
+                }
+            }
+            Some(m)
+        };
+        let cf = |j: usize| -> f32 {
+            match &cmask {
+                Some(m) if !m[j] => net.cfac,
+                _ => 1.0,
+            }
+        };
         let mut g = vec![f32::INFINITY; total];
         let mut parent = vec![u32::MAX; total];
         let mut dir = vec![255u8; total];
@@ -436,7 +467,7 @@ impl NegotiatedRouter {
                         continue;
                     }
                     let len = if dx != 0 && dy != 0 { 1.41421356 } else { 1.0 };
-                    let mut step = len * pres_t(c, l);
+                    let mut step = len * pres_t(c, l) * cf(j);
                     if d0 != 255 && d0 != di as u8 {
                         step += self.turn_cost;
                     }
@@ -471,7 +502,7 @@ impl NegotiatedRouter {
                                 && (self.forbidden[l2 as usize] || !step_ok(j, x, y, x, y, l2, c)) {
                                 continue;
                             }
-                            let ng = gc + vstep;
+                            let ng = gc + vstep * cf(j);
                             let valid = closed[j] == generation * 2 - 1;
                             if !valid || ng < g[j] {
                                 g[j] = ng;
@@ -860,6 +891,17 @@ impl NegotiatedRouter {
     /// Cells inside a BGA exclusion zone that `owner` may use: inclusive grid rectangles (x0, y0, x1, y1), KRT's
     /// window around each terminal. Cells outside every zone are dropped (never blocked by a zone). Call before
     /// `add_net`, which keeps a terminal's cells by `track_ok`. Returns the cells kept.
+    /// The global plan's corridor for net i: cell rects (x0, y0, x1, y1, layer bit mask); a cell outside them
+    /// costs `factor` times as much (factor <= 1 or no rects: no corridor).
+    pub fn set_corridor(&mut self, i: usize, rects: Vec<(i32, i32, i32, i32, u32)>, factor: f32) -> PyResult<()> {
+        if i >= self.nets.len() {
+            return Err(pyo3::exceptions::PyIndexError::new_err("no such net"));
+        }
+        self.nets[i].corridor = rects;
+        self.nets[i].cfac = factor;
+        Ok(())
+    }
+
     pub fn add_allowed(&mut self, owner: i32, rects: Vec<(i32, i32, i32, i32)>) -> usize {
         let base = &self.base;
         let set = self.allowed.entry(owner).or_default();
@@ -913,7 +955,7 @@ impl NegotiatedRouter {
         }
         self.nets.push(Net { net_id, owner, terminals: terms, centres, bbox: bb, full: false,
                              extra: extra.max(0.0), dt: Vec::new(), dtv: Vec::new(), ext: Vec::new(),
-                             own_vias: own_vias.unwrap_or_default() });
+                             own_vias: own_vias.unwrap_or_default(), corridor: Vec::new(), cfac: 1.0 });
         self.routes.push(None);
         self.unroutable.push(false);
         Ok(self.nets.len() - 1)

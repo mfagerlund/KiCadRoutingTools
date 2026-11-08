@@ -350,6 +350,19 @@ def route_negotiated(state, single_ended_nets: List[Tuple[str, int]], cancel_che
 
     picked, rest, origs, terms_of = [], [], [], []
     max_terms = _env_num('KRT_NEGOTIATED_MAX_TERMINALS', 32, int)
+    # Global-plan corridors (trial, 2026-11-08): KRT_CORRIDORS names a JSON file {net name: [[x0, y0, x1, y1,
+    # [z...]], ...]} in board mm, z = copper index top to bottom (tscircuit's capacity-mesh nodes each net's
+    # connections cross); KRT_CORRIDOR_FACTOR prices a step outside them (default 3).
+    corridors = None
+    n_corr = 0
+    corridor_factor = _env_num('KRT_CORRIDOR_FACTOR', 3.0)
+    if os.environ.get('KRT_CORRIDORS'):
+        import json as _json
+        with open(os.environ['KRT_CORRIDORS'], encoding='utf-8') as _f:
+            corridors = _json.load(_f)
+    # board copper order (F.Cu, In1.Cu, ..., B.Cu) to this router's layer index
+    _copper = list(pcb_data.board_info.copper_layers)
+    layer_map_z = {z: layer_names.index(n) for z, n in enumerate(_copper) if n in layer_names}
     tw = config.track_width
     t_terms = 0.0
     for name, nid in single_ended_nets:
@@ -373,7 +386,22 @@ def route_negotiated(state, single_ended_nets: List[Tuple[str, int]], cancel_che
         own_vias = sorted({tuple(int(v) for v in coord.to_grid(v.x, v.y)) for v in pcb_data.vias if v.net_id == nid})
         if os.environ.get('KRT_NEG_NO_OWN_VIAS'):  # diagnosis knob
             own_vias = []
-        router.add_net(int(nid), int(nid), [t[0] for t in terms], extra=extra, own_vias=own_vias)
+        ni = router.add_net(int(nid), int(nid), [t[0] for t in terms], extra=extra, own_vias=own_vias)
+        if corridors is not None:
+            rects = corridors.get(name)
+            if rects:
+                cells = []
+                for x0_, y0_, x1_, y1_, zs in rects:
+                    a = coord.to_grid(x0_, y0_)
+                    b = coord.to_grid(x1_, y1_)
+                    mask = 0
+                    for z in zs:
+                        if z in layer_map_z:
+                            mask |= 1 << layer_map_z[z]
+                    cells.append((int(min(a[0], b[0])), int(min(a[1], b[1])),
+                                  int(max(a[0], b[0])), int(max(a[1], b[1])), mask))
+                router.set_corridor(ni, cells, corridor_factor)
+                n_corr += 1
         orig = {}
         for _, o in terms:
             orig.update(o)
@@ -400,6 +428,8 @@ def route_negotiated(state, single_ended_nets: List[Tuple[str, int]], cancel_che
         chunk=_env_num('KRT_NEGOTIATED_CHUNK', 16, int), stop_file=stop or '',
         pres_max=_env_num('KRT_NEGOTIATED_PRES_MAX', 30.0),
         **({'async_mode': True} if os.environ.get('KRT_NEGOTIATED_ASYNC', '') not in ('', '0') else {}))
+    if corridors is not None:
+        print(f"Negotiated main pass: corridors for {n_corr} of {len(picked)} nets (factor {corridor_factor:g})")
     print(f"\nNegotiated main pass: {len(picked)} nets ({len(rest)} left to the sequential loop), "
           f"grid {w}x{h}x{len(layer_names)}; terminals built in {t_terms:.1f} s")
     stats = router.run()
