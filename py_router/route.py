@@ -2728,7 +2728,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     _sequential_nets = single_ended_nets
     if single_ended_nets and _negotiated.wanted(len(single_ended_nets)):
         _n_ok, _sequential_nets, _n_time = _negotiated.route_negotiated(state, single_ended_nets, cancel_check)
-        if os.environ.get('KRT_NEGOTIATED_NO_FALLBACK'):   # measurement: the negotiated pass alone
+        if os.environ.get('KRT_NEGOTIATED_NO_FALLBACK', '') not in ('', '0'):   # measurement: the negotiated pass alone
             _sequential_nets = []
         successful += _n_ok
         total_time += _n_time
