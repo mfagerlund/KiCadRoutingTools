@@ -95,3 +95,35 @@ def test_refill_records_count_only_at_own_project(monkeypatch):
         os.utime(b, ns=(2, 2))
         kef.refill_islands_ex(b)
         assert kef.known_unconnected_count(b) is None
+
+
+def test_cli_union_needed():
+    per = {'GND': 0, '/A': 2, '/B': 1}
+    assert not ko.cli_union_needed((per, frozenset()), {'GND'})           # foreign links on pad-only nets
+    assert ko.cli_union_needed((per, frozenset({'/B'})), {'GND'})         # a foreign net with copper: debris
+    assert ko.cli_union_needed((per, frozenset()), {'GND', '/A'})         # demand on a processed net
+    assert not ko.cli_union_needed(({}, frozenset({'/A'})), {'GND'})      # nothing open anywhere
+    assert not ko.cli_union_needed(({'/A': 0}, frozenset({'/A'})), {'GND'})
+
+
+def test_refill_records_per_net_split(monkeypatch):
+    with tempfile.TemporaryDirectory() as tmp:
+        b = _board(tmp)
+        monkeypatch.setattr(kef, 'find_kicad_python', lambda: 'kpy')
+        line = 'UNCONNECTED_COUNT 3\nUNCONNECTED_NETS {"per": {"/A": 2, "/B": 1}, "copper": ["/B"]}\n'
+        monkeypatch.setattr(kef.subprocess, 'run', _fake_refill(line))
+        kef._UNCONNECTED_COUNT.clear()
+        kef._UNCONNECTED_NETS.clear()
+        kef._REFILL_MEMO.clear()
+        kef.refill_islands_ex(b)
+        assert kef.known_unconnected_nets(b) == ({'/A': 2, '/B': 1}, frozenset({'/B'}))
+        # a count without the split (the script withheld it): no split recorded, the count still is
+        monkeypatch.setattr(kef.subprocess, 'run', _fake_refill('UNCONNECTED_COUNT 3\n'))
+        kef._REFILL_MEMO.clear()
+        kef.refill_islands_ex(b)
+        assert kef.known_unconnected_count(b) == 3 and kef.known_unconnected_nets(b) is None
+        # malformed split: ignored
+        monkeypatch.setattr(kef.subprocess, 'run', _fake_refill('UNCONNECTED_COUNT 3\nUNCONNECTED_NETS {"per": 1}\n'))
+        kef._REFILL_MEMO.clear()
+        kef.refill_islands_ex(b)
+        assert kef.known_unconnected_nets(b) is None

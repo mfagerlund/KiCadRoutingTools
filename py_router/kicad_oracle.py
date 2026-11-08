@@ -276,6 +276,19 @@ _UNCONNECTED_MEMO: Dict[Tuple, Optional[List[Tuple]]] = {}
 _UNCONNECTED_MEMO_CAP = 8
 
 
+def cli_union_needed(known_nets, names) -> bool:
+    """Whether oracle_reconnect's kicad-cli union DRC can change its outcome,
+    given a refill's per-net split ({net: ratsnest edges}, nets with track/via
+    copper; kicad_exact_fill.known_unconnected_nets). Not needed when KiCad
+    demands no link on any processed net (the exact links are then dropped
+    and the net reads complete) and every other net with a link has no track
+    or via (the debris pass deletes track/via fragments only)."""
+    per, copper = known_nets
+    if any(per.get(n) for n in names):
+        return True
+    return any(n in copper for n, k in per.items() if k and n not in names)
+
+
 def kicad_unconnected(board_file: str, kicad_cli: str,
                       timeout: int = ORACLE_DRC_TIMEOUT,
                       timed_out: Optional[set] = None) -> Optional[List[Tuple]]:
@@ -1741,8 +1754,23 @@ def oracle_reconnect(board_file: str, net_names, config,
         # KICAD_ORACLE_UNION=0 restores the pure exact source for A/B.
         if links is not None and _links_from_exact \
                 and env_knobs.ORACLE_UNION:
-            _cli648 = kicad_unconnected(board_file, kicad_cli,
-                                       timed_out=_timed_out)
+            # The refill that produced `links` also split KiCad's unconnected
+            # count per net. When it names no processed net, kicad-cli would
+            # demand none of them (the exact links are dropped below), and
+            # when every other net it names has no track or via, the debris
+            # pass can delete nothing on those nets (pad-only clusters): the
+            # DRC cannot change what this call does, so it is not run.
+            _cli648 = None
+            try:
+                from kicad_exact_fill import known_unconnected_nets
+                _kn = known_unconnected_nets(board_file)
+            except Exception:
+                _kn = None
+            if _kn is not None and not cli_union_needed(_kn, names):
+                _cli648 = []
+            if _cli648 is None:
+                _cli648 = kicad_unconnected(board_file, kicad_cli,
+                                           timed_out=_timed_out)
             if _cli648 is not None:
                 # Out-of-scope links from BOTH sources (#659 audit). The
                 # exact source's foreign links were already kept here, but

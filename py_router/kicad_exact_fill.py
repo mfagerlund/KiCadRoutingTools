@@ -99,7 +99,48 @@ try:
         plain.BuildConnectivity()
         pcbnew.ZONE_FILLER(plain).Fill(plain.Zones())
     plain.BuildConnectivity()
-    print("UNCONNECTED_COUNT", plain.GetConnectivity().GetUnconnectedCount(False))
+    _conn = plain.GetConnectivity()
+    _count = _conn.GetUnconnectedCount(False)
+    print("UNCONNECTED_COUNT", _count)
+    # Per net, the same count: a net's ratsnest is a spanning tree over its
+    # connectivity clusters, so it lists (clusters - 1) edges. Clusters are
+    # counted over the net's pads and tracks/vias (GetConnectedItems walks
+    # each one's cluster, zone fill included). Printed only when the per-net
+    # sum equals KiCad's own total, so a cluster this walk cannot see (a
+    # pad-less zone island, say) withholds the table instead of skewing it.
+    import json as _json
+    _nodes = {}
+    _copper = set()
+    for _p in plain.GetPads():
+        if _p.GetNetCode() > 0:
+            _nodes.setdefault(_p.GetNetCode(), []).append(_p)
+    for _t in plain.GetTracks():
+        if _t.GetNetCode() > 0:
+            _nodes.setdefault(_t.GetNetCode(), []).append(_t)
+            _copper.add(_t.GetNetCode())
+
+    def _key(_i):
+        _q = _i.GetPosition()
+        return (_i.m_Uuid.AsString(), _i.GetClass(), _q.x, _q.y)
+    _per = {}
+    for _nc, _items in _nodes.items():
+        _seen = set()
+        _k = 0
+        for _it in _items:
+            if _key(_it) in _seen:
+                continue
+            _k += 1
+            _seen.add(_key(_it))
+            for _o in _conn.GetConnectedItems(_it):
+                _seen.add(_key(_o))
+        if _k > 1:
+            _per[_nc] = _k - 1
+    if sum(_per.values()) == _count:
+        def _nm(_nc):
+            return plain.FindNet(_nc).GetNetname()   # kicad_parser's Net.name
+        print("UNCONNECTED_NETS " + _json.dumps(
+            {"per": {_nm(k): v for k, v in _per.items()},
+             "copper": sorted(_nm(k) for k in _copper)}))
 except Exception as e:
     print("(unconnected count skipped:", e, ")")
 """
@@ -407,6 +448,10 @@ _REFILL_MEMO_CAP = 8
 #: the board's sibling project (or at none) -- the project kicad-cli's DRC
 #: would read -- so the count is the one a kicad-cli DRC of these bytes gives.
 _UNCONNECTED_COUNT: Dict[tuple, int] = {}
+#: The same refill's per-net split, under the same key and condition:
+#: ({net name: ratsnest edges}, frozenset of net names carrying track/via
+#: copper). Absent when the refill could not account for the whole count.
+_UNCONNECTED_NETS: Dict[tuple, tuple] = {}
 
 
 def unconnected_content_key(board_file: str):
@@ -433,6 +478,15 @@ def known_unconnected_count(board_file: str):
         return None
     k = unconnected_content_key(board_file)
     return _UNCONNECTED_COUNT.get(k) if k is not None else None
+
+
+def known_unconnected_nets(board_file: str):
+    """({net: KiCad ratsnest edges}, frozenset(nets with track/via copper))
+    for these exact bytes from an earlier refill in this process, or None."""
+    if not _UNCONNECTED_NETS:
+        return None
+    k = unconnected_content_key(board_file)
+    return _UNCONNECTED_NETS.get(k) if k is not None else None
 # Keys whose refill FAILED (audit finding): remember the "no" so N consumers
 # do not each pay a pcbnew subprocess to rediscover it.
 _REFILL_FAILED: set = set()
@@ -647,7 +701,21 @@ def refill_islands_ex(board_file: str, timeout: int = EXACT_FILL_TIMEOUT,
             if _ck is not None:
                 if len(_UNCONNECTED_COUNT) >= 64:
                     _UNCONNECTED_COUNT.clear()
+                    _UNCONNECTED_NETS.clear()
                 _UNCONNECTED_COUNT[_ck] = int(_cnt[-1])
+                _UNCONNECTED_NETS.pop(_ck, None)
+                _pn = [l[len('UNCONNECTED_NETS '):]
+                       for l in (r.stdout or '').splitlines()
+                       if l.startswith('UNCONNECTED_NETS ')]
+                if _pn:
+                    try:
+                        import json as _json
+                        _d = _json.loads(_pn[-1])
+                        _UNCONNECTED_NETS[_ck] = (
+                            {str(k): int(v) for k, v in _d['per'].items()},
+                            frozenset(_d['copper']))
+                    except (ValueError, KeyError, TypeError):
+                        pass
     except subprocess.TimeoutExpired:
         # A TIMEOUT is not remembered as a failure: it is a budget verdict,
         # not a property of the board, and a later step may legitimately have
