@@ -70,9 +70,10 @@ if board is None:
 # filling as-loaded keeps NO knockout around it -- phantom pour joins for
 # exactly the copper the fill was meant to pull back from. Restore the
 # FILE's stored netcodes before filling (mez_rx: 24 fanout vias per load).
+repinned = None
 try:
     from kicad_exact_fill import repin_netcodes_from_file
-    n = repin_netcodes_from_file(board, src)
+    n = repinned = repin_netcodes_from_file(board, src)
     if n:
         print("REPIN", n)
 except Exception as e:
@@ -85,6 +86,22 @@ filler.Fill(zones)
 # when the staged project predates KiCad 10.
 pcbnew.SaveBoard(dst, board, aSkipSettings=True)
 print("REFILL_OK", len(list(zones)))
+# KiCad's own unconnected count, on a board loaded and filled the way
+# kicad-cli DRC --refill-zones does it (no netcode repin): the count of
+# ratsnest edges its unconnected_items lists. kicad_unconnected answers []
+# from a 0 here instead of paying a kicad-cli DRC for the same answer.
+# When the repin changed nothing, the board just filled IS that board; only
+# a repinned board needs a second, plain load and fill.
+try:
+    plain = board
+    if repinned != 0:
+        plain = pcbnew.LoadBoard(src)
+        plain.BuildConnectivity()
+        pcbnew.ZONE_FILLER(plain).Fill(plain.Zones())
+    plain.BuildConnectivity()
+    print("UNCONNECTED_COUNT", plain.GetConnectivity().GetUnconnectedCount(False))
+except Exception as e:
+    print("(unconnected count skipped:", e, ")")
 """
 
 
@@ -385,6 +402,37 @@ def _polygon_area(poly) -> float:
 
 _REFILL_MEMO: Dict[tuple, dict] = {}
 _REFILL_MEMO_CAP = 8
+#: {content_key(board, sibling project): KiCad's unconnected count} from the
+#: refill subprocess (see _REFILL_SCRIPT). Recorded only when the refill ran at
+#: the board's sibling project (or at none) -- the project kicad-cli's DRC
+#: would read -- so the count is the one a kicad-cli DRC of these bytes gives.
+_UNCONNECTED_COUNT: Dict[tuple, int] = {}
+
+
+def unconnected_content_key(board_file: str):
+    """(sha1 of the board bytes, sha1 of its sibling .kicad_pro or None);
+    None when the board cannot be read."""
+    import hashlib
+    try:
+        with open(board_file, 'rb') as f:
+            kb = hashlib.sha1(f.read()).hexdigest()
+        pro = os.path.splitext(board_file)[0] + '.kicad_pro'
+        kp = None
+        if os.path.isfile(pro):
+            with open(pro, 'rb') as f:
+                kp = hashlib.sha1(f.read()).hexdigest()
+        return (kb, kp)
+    except OSError:
+        return None
+
+
+def known_unconnected_count(board_file: str):
+    """KiCad's unconnected count for these exact bytes from an earlier refill
+    in this process, or None when no refill of them reported one."""
+    if not _UNCONNECTED_COUNT:
+        return None
+    k = unconnected_content_key(board_file)
+    return _UNCONNECTED_COUNT.get(k) if k is not None else None
 # Keys whose refill FAILED (audit finding): remember the "no" so N consumers
 # do not each pay a pcbnew subprocess to rediscover it.
 _REFILL_FAILED: set = set()
@@ -590,6 +638,16 @@ def refill_islands_ex(board_file: str, timeout: int = EXACT_FILL_TIMEOUT,
                                       time.monotonic() - _t0)
         with open(filled, 'r', encoding='utf-8') as f:
             text = f.read()
+        _cnt = [l.split()[1] for l in (r.stdout or '').splitlines()
+                if l.startswith('UNCONNECTED_COUNT ')]
+        if _cnt and _cnt[-1].isdigit() and (
+                os.path.isfile(sib_pro) == os.path.isfile(
+                    os.path.splitext(board_file)[0] + '.kicad_pro')):
+            _ck = unconnected_content_key(board_file)
+            if _ck is not None:
+                if len(_UNCONNECTED_COUNT) >= 64:
+                    _UNCONNECTED_COUNT.clear()
+                _UNCONNECTED_COUNT[_ck] = int(_cnt[-1])
     except subprocess.TimeoutExpired:
         # A TIMEOUT is not remembered as a failure: it is a budget verdict,
         # not a property of the board, and a later step may legitimately have

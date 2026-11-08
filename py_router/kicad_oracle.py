@@ -319,6 +319,18 @@ def kicad_unconnected(board_file: str, kicad_cli: str,
             return _UNCONNECTED_MEMO[_memo_key]
     except OSError:
         _memo_key = None
+    # A refill of these same bytes already asked KiCad (the exact-fill
+    # subprocess loads and fills the board the way this DRC does, and reports
+    # its unconnected count): 0 means this DRC would list no unconnected item,
+    # so the 2.5-3.5 s kicad-cli run is skipped (pico-vga: 3 of its 5 KiCad
+    # round trips are this call). A non-zero count still runs the DRC, which
+    # is the source of the link geometry.
+    try:
+        from kicad_exact_fill import known_unconnected_count
+        if known_unconnected_count(board_file) == 0:
+            return []
+    except Exception:
+        pass
     with tempfile.NamedTemporaryFile(suffix='.json', delete=False) as f:
         out = f.name
     staged, tmpdir = _fast_connectivity_project(board_file)
