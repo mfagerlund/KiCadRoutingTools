@@ -9,6 +9,7 @@
   E. A stop file that exists stops a negotiation that has conflicts (C's) after its first pass ("time limit").
   F. Hard keep-outs: a cell another owner's keep-out covers is never used.
   G. Async mode (work queue, commit checked against the commits since the search began): A and C hold.
+  J. A plane tap (pad -> any plane cell nearby, through a via) negotiated with a signal over the pad.
 
 Run with:  python tests/test_negotiated_router.py
 """
@@ -171,6 +172,23 @@ def main():
     check(s['stopped'] == 'converged' and not s['dropped'], f"I converged with nothing dropped ({s['stopped']}, {s['passes']} passes)")
     rep = r.terminal_report(wnet)
     check(len(rep) == 2 and all(t[0] == 1 and t[2] == 1 for t in rep), f"I terminal_report sees free terminals ({rep})")
+
+    # J: a plane tap (KRT_NEGOTIATED_PLANE_TAPS): the pad on layer 0, the plane terminal every cell of layer 1 (the
+    # forbidden plane layer) within 4 cells of it. A signal crossing right over the pad competes for the via site;
+    # the tap ends on the plane through one via with no step along the plane, and both are legal.
+    r = router(2)
+    r.set_layer_forbidden([False, True])
+    pad = (20, 10)
+    plane = [(pad[0] + dx, pad[1] + dy, 1) for dx in range(-4, 5) for dy in range(-4, 5) if dx * dx + dy * dy <= 16]
+    tap = r.add_net(-1, 7, [[(pad[0], pad[1], 0)], plane])
+    sig = r.add_net(2, 2, [[(2, 10, 0)], [(37, 10, 0)]])
+    s = r.run()
+    pt, ps = r.paths(tap), r.paths(sig)
+    on1 = [c for c in cells(pt or []) if c[2] == 1]
+    check(s['routed'] == 2 and not s['dropped'] and bool(pt) and bool(ps), f"J tap and signal both routed ({s['routed']}, dropped {s['dropped']})")
+    check(len(on1) == 1 and on1[0] in set(plane), f"J tap reaches the plane at one cell through a via ({on1})")
+    check(bool(pt) and bool(ps) and min_gap([[c for p in pt for c in p if c[2] == 0]], ps) >= R_TT,
+          f"J tap keeps r_tt from the signal on layer 0 (gap {min_gap(pt, ps) if pt and ps else None})")
 
     print(f'\n{len(FAILS)} failure(s)')
     return 1 if FAILS else 0

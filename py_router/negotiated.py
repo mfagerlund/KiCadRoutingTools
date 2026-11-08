@@ -76,6 +76,68 @@ def pad_terminal_cells(pad, coord, layer_map, routing_layers, track_width):
     return [(gx + dx, gy + dy, li) for li in layers for dx, dy in offs], (pad.global_x, pad.global_y)
 
 
+def plane_tap_searches(router, pcb_data, config, coord, layer_map, forbidden, rest):
+    """Plane taps in the core (KRT_NEGOTIATED_PLANE_TAPS=1, 2026-11-08). Every pad of a plane net in `rest` (a net
+    with a zone on a forbidden layer) that has no connection to its plane becomes a two-terminal search: the pad, and
+    the plane-layer cells inside the net's zone (outside other nets' zones on that layer) within
+    KRT_NEGOTIATED_PLANE_TAP_MM (3 mm) of it, which the search reaches through a via. The core negotiates them with
+    the signals (owner = the plane net, so the taps never conflict with each other). Without it plane finalize taps
+    those pads after the signals and rips signals in the way (cm5io, 2026-11-08: 76 GND pads, 9 signal nets lost).
+    Returns [(name, nid, router index, {cell: point}, label)]."""
+    import shapely
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+    from plane_pad_tap import find_unconnected_plane_pads
+    zones = getattr(pcb_data, 'zones', None) or []
+    g = config.grid_step
+    rc = max(1, int(math.ceil(_env_num('KRT_NEGOTIATED_PLANE_TAP_MM', 3.0) / g)))
+    disk = sorted(((dx, dy) for dx in range(-rc, rc + 1) for dy in range(-rc, rc + 1) if dx * dx + dy * dy <= rc * rc),
+                  key=lambda d: d[0] * d[0] + d[1] * d[1])
+    dxs = np.array([d[0] for d in disk])
+    dys = np.array([d[1] for d in disk])
+    tw = config.track_width
+    layer_names = list(config.layers)
+    out = []
+    for name, nid in rest:
+        zl = sorted({z.layer for z in zones if z.net_id == nid and z.layer in layer_map and forbidden[layer_map[z.layer]]})
+        if not zl:
+            continue
+        pads = find_unconnected_plane_pads(pcb_data, nid, set(zl))
+        if not pads:
+            continue
+        layer = zl[0]
+        lz = layer_map[layer]
+        mine = unary_union([Polygon(z.polygon) for z in zones
+                            if z.net_id == nid and z.layer == layer and len(z.polygon) >= 3]).buffer(0)
+        other = [Polygon(z.polygon) for z in zones if z.net_id != nid and z.layer == layer and len(z.polygon) >= 3]
+        if other:
+            mine = mine.difference(unary_union(other).buffer(0))
+        own_vias = sorted({tuple(int(v) for v in coord.to_grid(v.x, v.y)) for v in pcb_data.vias if v.net_id == nid})
+        net_w = max(config.get_net_track_width(nid, ln) for ln in layer_names)
+        extra = max(0.0, (net_w - tw) / 2.0 / g)
+        for pad, _pl in pads:
+            cells, centre = pad_terminal_cells(pad, coord, layer_map, config.layers, tw)
+            if not cells:
+                continue
+            gx, gy = coord.to_grid(pad.global_x, pad.global_y)
+            xs, ys = gx + dxs, gy + dys
+            pts = [coord.to_float(int(x), int(y)) for x, y in zip(xs, ys)]
+            inside = shapely.contains_xy(mine, [q[0] for q in pts], [q[1] for q in pts])
+            plane = [(int(x), int(y), lz) for x, y, ok in zip(xs, ys, inside) if ok]
+            if not plane:
+                continue
+            orig = {c: centre for c in cells}
+            for c in plane:
+                orig[c] = coord.to_float(c[0], c[1])
+            k = len(out) + 1
+            try:
+                ni = router.add_net(-k, int(nid), [cells, plane], extra=extra, own_vias=own_vias)
+            except ValueError:
+                continue
+            out.append((name, nid, ni, orig, f"{name} tap {pad.component_ref}.{pad.pad_number}"))
+    return out
+
+
 def net_terminals(pcb_data, net_id, config, coord, layer_map):
     """[(cells, {cell: (x, y) original point})] per terminal, or None when the net has no two terminals."""
     tw = config.track_width
@@ -336,17 +398,23 @@ def route_negotiated(state, single_ended_nets: List[Tuple[str, int]], cancel_che
     g = config.grid_step
     olinks = getattr(state, 'oracle_links_by_net', None) or {}
 
+    tap_mode = os.environ.get('KRT_NEGOTIATED_PLANE_TAPS', '')
+    tap_mode = '' if tap_mode == '0' else tap_mode
+    tapped_nets = set()
+    if tap_mode == 'first':
+        # the taps alone first, committed; the signals' router below sees them as the plane net's fixed copper
+        trouter, forbidden = _new_router(state, coord)
+        t0_taps = time.perf_counter()
+        taps = plane_tap_searches(trouter, pcb_data, config, coord, layer_map, forbidden, list(single_ended_nets))
+        if taps:
+            _set_params(trouter, config)
+            tstats = trouter.run()
+            n_t, n_v, tapped_nets = _commit_taps(state, trouter, taps, coord, layer_names)
+            print(f"Negotiated plane taps first: {n_t} of {len(taps)} pads tapped ({n_v} vias), "
+                  f"{tstats['stopped']} after {tstats['passes']} passes, {time.perf_counter() - t0_taps:.1f} s; "
+                  f"fixed for the signals")
+    router, forbidden = _new_router(state, coord)
     x0, y0, w, h = grid_bounds(pcb_data, coord)
-    router = grid_router.NegotiatedRouter(state.base_obstacles, x0, y0, w, h)
-    for nid, cd in (state.net_obstacles_cache or {}).items():
-        cells, vias = _cache_cells_and_vias(cd)
-        router.add_keepout(int(nid), np.ascontiguousarray(cells, dtype=np.int32),
-                           np.ascontiguousarray(vias, dtype=np.int32))
-
-    # KRT's layer costs: a negative cost forbids tracks on that layer (route.py appends the copper layers the
-    # caller did not list, the plane layers, with cost -1); through vias still span it
-    forbidden = [c < 0 for c in config.get_layer_costs()]
-    router.set_layer_forbidden(forbidden)
 
     picked, rest, origs, terms_of = [], [], [], []
     max_terms = _env_num('KRT_NEGOTIATED_MAX_TERMINALS', 32, int)
@@ -409,6 +477,21 @@ def route_negotiated(state, single_ended_nets: List[Tuple[str, int]], cancel_che
         origs.append(orig)
         terms_of.append([t[0] for t in terms])
 
+    taps = []
+    if tap_mode and tap_mode != 'first':
+        t0_taps = time.perf_counter()
+        taps = plane_tap_searches(router, pcb_data, config, coord, layer_map, forbidden, rest)
+        print(f"Negotiated main pass: {len(taps)} plane-tap searches for "
+              f"{len({t[1] for t in taps})} plane net(s), {time.perf_counter() - t0_taps:.1f} s")
+    _set_params(router, config)
+    if corridors is not None:
+        print(f"Negotiated main pass: corridors for {n_corr} of {len(picked)} nets (factor {corridor_factor:g})")
+    return _negotiate_and_commit(state, router, picked, rest, origs, terms_of, taps, tapped_nets, coord,
+                                 layer_names, w, h, t_terms, t0)
+
+
+def _set_params(router, config):
+    g = config.grid_step
     tw, cl = config.track_width, config.clearance
     vd, dr = config.via_size, config.via_drill
     h2h = getattr(config, 'hole_to_hole_clearance', 0.0) or 0.0
@@ -428,8 +511,56 @@ def route_negotiated(state, single_ended_nets: List[Tuple[str, int]], cancel_che
         chunk=_env_num('KRT_NEGOTIATED_CHUNK', 16, int), stop_file=stop or '',
         pres_max=_env_num('KRT_NEGOTIATED_PRES_MAX', 30.0),
         **({'async_mode': True} if os.environ.get('KRT_NEGOTIATED_ASYNC', '') not in ('', '0') else {}))
-    if corridors is not None:
-        print(f"Negotiated main pass: corridors for {n_corr} of {len(picked)} nets (factor {corridor_factor:g})")
+
+
+def _new_router(state, coord):
+    """A negotiated router on the board's grid with every net's current copper as its keep-out, and the forbidden
+    layers set: KRT's layer costs, a negative cost forbids tracks on that layer (route.py appends the copper layers
+    the caller did not list, the plane layers, with cost -1); through vias still span it."""
+    pcb_data, config = state.pcb_data, state.config
+    x0, y0, w, h = grid_bounds(pcb_data, coord)
+    router = grid_router.NegotiatedRouter(state.base_obstacles, x0, y0, w, h)
+    for nid, cd in (state.net_obstacles_cache or {}).items():
+        cells, vias = _cache_cells_and_vias(cd)
+        router.add_keepout(int(nid), np.ascontiguousarray(cells, dtype=np.int32),
+                           np.ascontiguousarray(vias, dtype=np.int32))
+    forbidden = [c < 0 for c in config.get_layer_costs()]
+    router.set_layer_forbidden(forbidden)
+    return router, forbidden
+
+
+def _commit_taps(state, router, taps, coord, layer_names):
+    """Each plane net's routed taps as one result (register_success); returns (pads tapped, vias, {(name, nid)})."""
+    pcb_data, config = state.pcb_data, state.config
+    tapped, th_cache = {}, {}
+    for name, nid, ni, orig, _label in taps:
+        paths = router.paths(ni)
+        if not paths:
+            continue
+        if nid not in th_cache:
+            th_cache[nid] = get_same_net_through_hole_positions(pcb_data, nid, config)
+        acc = tapped.setdefault((name, nid), {'segs': [], 'vias': [], 'n': 0, 'path': []})
+        for p in paths:
+            s, v = path_copper(pcb_data, nid, config, p, orig, layer_names, coord, th_cache[nid])
+            acc['segs'] += s
+            acc['vias'] += v
+            if len(p) > len(acc['path']):
+                acc['path'] = p
+        acc['n'] += 1
+    for (name, nid), acc in tapped.items():
+        result = {'net_id': nid, 'new_segments': acc['segs'], 'new_vias': acc['vias'], 'iterations': 0,
+                  'path_length': len(acc['path']), 'path': acc['path'], 'negotiated': True}
+        register_success(state, nid, result)
+        cache = state.net_obstacles_cache
+        if state.working_obstacles is None and cache is not None:
+            # register_success refreshes the keep-out cache only with a working map; the next router reads it
+            update_net_obstacles_after_routing(pcb_data, nid, result, config, cache)
+    return (sum(a['n'] for a in tapped.values()), sum(len(a['vias']) for a in tapped.values()), set(tapped))
+
+
+def _negotiate_and_commit(state, router, picked, rest, origs, terms_of, taps, tapped_nets, coord, layer_names,
+                          w, h, t_terms, t0):
+    pcb_data, config = state.pcb_data, state.config
     print(f"\nNegotiated main pass: {len(picked)} nets ({len(rest)} left to the sequential loop), "
           f"grid {w}x{h}x{len(layer_names)}; terminals built in {t_terms:.1f} s")
     stats = router.run()
@@ -440,6 +571,9 @@ def route_negotiated(state, single_ended_nets: List[Tuple[str, int]], cancel_che
           f"dropped {len(stats['dropped'])}, unroutable {len(stats['unroutable'])}")
     names = {nid: name for name, nid in picked}
     index = {nid: i for i, (_, nid) in enumerate(picked)}
+    for k, (_n, _nid, ni, _o, label) in enumerate(taps):
+        names[-(k + 1)] = label
+        index[-(k + 1)] = ni
     for key in ('unroutable', 'dropped'):
         if stats[key]:
             print(f"  negotiation {key}: {', '.join(names.get(n, str(n)) for n in stats[key])}")
@@ -497,6 +631,15 @@ def route_negotiated(state, single_ended_nets: List[Tuple[str, int]], cancel_che
                   'path_length': sum(len(p) for p in paths), 'path': longest, 'negotiated': True}
         register_success(state, nid, result)
         ok += 1
+    if taps:
+        n_t, n_v, more = _commit_taps(state, router, taps, coord, layer_names)
+        tapped_nets = set(tapped_nets) | more
+        print(f"Negotiated plane taps: {n_t} of {len(taps)} pads tapped ({n_v} vias)")
+    # plane finalize repairs the pads the core did not tap; the sequential loop never re-routes a tapped plane net
+    # (its result here is the taps)
+    for key in tapped_nets:
+        if key in rest:
+            rest.remove(key)
     secs = time.time() - t0
     print(f"Negotiated main pass: {ok} nets routed in {secs:.1f} s; {len(rest)} to the sequential loop")
     state.negotiated_stats = {k: stats[k] for k in ('passes', 'stopped', 'seconds', 'routed', 'dropped', 'unroutable')}
