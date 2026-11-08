@@ -643,6 +643,41 @@ def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
         if excess is not None:
             dist = dist - excess
         return float(np.min(dist))
+    if ax.size > 4 and sx.size > 4:
+        # Prune, value-identical (2026-11-08): a column's sampled minimum is never below the exact
+        # segment-to-segment distance (every sample lies on the moving segment), so a column whose exact lower
+        # bound exceeds one column's sampled value cannot hold the minimum. Columns are computed independently,
+        # so the kept ones give bit-identical values. cm5io: the smoothing pass's clears() spent ~43 s here.
+        def _p2ab_lb(px, py):
+            pax_ = px - ax; pay_ = py - ay
+            tt_ = np.where(L2 > 0, np.clip((pax_ * abx + pay_ * aby) / safe_L2, 0.0, 1.0), 0.0)
+            return np.hypot(px - (ax + tt_ * abx), py - (ay + tt_ * aby))
+        lb = np.minimum(_p2ab_lb(x1, y1), _p2ab_lb(x2, y2))
+        ux, uy = x2 - x1, y2 - y1
+        UL2 = ux * ux + uy * uy
+        if UL2 > 0:
+            for qx, qy in ((ax, ay), (bx, by)):
+                tt_ = np.clip(((qx - x1) * ux + (qy - y1) * uy) / UL2, 0.0, 1.0)
+                lb = np.minimum(lb, np.hypot(qx - (x1 + tt_ * ux), qy - (y1 + tt_ * uy)))
+            c1 = ux * (ay - y1) - uy * (ax - x1)
+            c2 = ux * (by - y1) - uy * (bx - x1)
+            c3 = abx * (y1 - ay) - aby * (x1 - ax)
+            c4 = abx * (y2 - ay) - aby * (x2 - ax)
+            lb = np.where((c1 * c2 < 0) & (c3 * c4 < 0), 0.0, lb)
+        lb = lb - hw - (excess if excess is not None else 0.0)
+        j = int(np.argmin(lb))
+        tj = (((sx - ax[j]) * abx[j] + (sy - ay[j]) * aby[j]) / safe_L2[j])
+        tj = np.clip(tj, 0.0, 1.0) if L2[j] > 0 else np.zeros_like(tj)
+        dj = np.hypot(sx - (ax[j] + tj * abx[j]), sy - (ay[j] + tj * aby[j])) - hw[j]
+        if excess is not None:
+            dj = dj - excess[j]
+        keep = lb <= float(np.min(dj)) + 1e-9
+        keep[j] = True
+        if not keep.all():
+            ax, ay, abx, aby, L2, safe_L2, hw = (ax[keep], ay[keep], abx[keep], aby[keep], L2[keep],
+                                                 safe_L2[keep], hw[keep])
+            if excess is not None:
+                excess = excess[keep]
     rows = max(1, _SWEEP_CHUNK // ax.size)      # see _SWEEP_CHUNK
     best = math.inf
     for r0 in range(0, sx.size, rows):
