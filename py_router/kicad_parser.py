@@ -7878,10 +7878,46 @@ def release_text_caches() -> None:
     _mask_pad_primitives.cache_clear()
     _footprint_blocks_by_key_cached.cache_clear()
     _footprint_edge_points_by_ref_cached.cache_clear()
+_PARSE_BYTES_MEMO: Dict[tuple, bytes] = {}
+_PARSE_BYTES_MEMO_CAP = 16
 
 
 def parse_kicad_pcb(filepath: str, guide_layer: str = "User.1",
                     keepout_layer: str = "User.2") -> PCBData:
+    """parse_kicad_pcb_uncached, memoised on the file's bytes. One route.py process parses the same board up to 16
+    times (pic: 16 parses, 0.11 s each); the memo keeps the first parse pickled and hands every later caller a fresh
+    unpickled copy (2-8 ms), so no caller sees another's mutations. KRT_PARSE_MEMO=0: off. KRT_PARSE_MEMO_CHECK=1:
+    every hit is parsed anyway and must pickle to the stored bytes. A board with duplicate references is not memoised
+    (its parse prints a warning each time)."""
+    import hashlib
+    import pickle
+    mode = os.environ.get('KRT_PARSE_MEMO', '1')
+    if mode == '0':
+        return parse_kicad_pcb_uncached(filepath, guide_layer, keepout_layer)
+    with open(filepath, 'rb') as f:
+        raw = f.read()
+    key = (hashlib.sha1(raw).hexdigest(), guide_layer, keepout_layer)
+    blob = _PARSE_BYTES_MEMO.get(key)
+    if blob is not None:
+        data = pickle.loads(blob)
+        data.source_path = os.path.abspath(filepath) if filepath else ""
+        if os.environ.get('KRT_PARSE_MEMO_CHECK') == '1':
+            fresh = parse_kicad_pcb_uncached(filepath, guide_layer, keepout_layer)
+            # against the stored bytes: a round trip can change object sharing (the unpickler interns
+            # instance-dict keys), not the values
+            assert pickle.dumps(fresh, protocol=pickle.HIGHEST_PROTOCOL) == blob, (
+                f"KRT_PARSE_MEMO_CHECK: memo differs on {filepath}")
+        return data
+    data = parse_kicad_pcb_uncached(filepath, guide_layer, keepout_layer)
+    if not data.duplicate_references:
+        if len(_PARSE_BYTES_MEMO) >= _PARSE_BYTES_MEMO_CAP:
+            _PARSE_BYTES_MEMO.clear()
+        _PARSE_BYTES_MEMO[key] = pickle.dumps(data, protocol=pickle.HIGHEST_PROTOCOL)
+    return data
+
+
+def parse_kicad_pcb_uncached(filepath: str, guide_layer: str = "User.1",
+                             keepout_layer: str = "User.2") -> PCBData:
     """
     Parse a KiCad PCB file and extract all routing-relevant information.
 
