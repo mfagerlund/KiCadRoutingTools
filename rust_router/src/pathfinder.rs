@@ -29,6 +29,7 @@ use std::collections::BinaryHeap;
 use std::sync::atomic::{AtomicU16, AtomicU64, Ordering as AO};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
+use std::cell::RefCell;
 
 use crate::obstacle_map::GridObstacleMap;
 use crate::types::pack_xy;
@@ -122,6 +123,56 @@ impl PartialOrd for Open {
     fn partial_cmp(&self, o: &Self) -> Option<Ordering> { Some(self.cmp(o)) }
 }
 
+/// A pool thread's node records, kept between its searches (see NodeBufGuard).
+#[derive(Default)]
+struct NodeBuf {
+    v: Vec<Node>,
+    dirty: Vec<u32>,
+    gen: u32,
+}
+thread_local! {
+    static NODE_BUF: RefCell<NodeBuf> = RefCell::new(NodeBuf::default());
+}
+const NODE_INIT: Node = Node { g: f32::INFINITY, parent: u32::MAX, closed: 0, goal: 0, dir: 255, tm: false };
+
+/// The thread's node buffer for one search: at least `total` records, all stale (closed stamps below the next
+/// generation*2-1), goal 0 and tm false. On drop the cells the search marked (dirty) are cleared and the buffer goes
+/// back to the thread unless it is larger than `keep` records.
+struct NodeBufGuard {
+    v: Vec<Node>,
+    dirty: Vec<u32>,
+    gen: u32,
+    keep: usize,
+}
+impl NodeBufGuard {
+    fn take(total: usize, keep: usize) -> Self {
+        let mut b = NODE_BUF.with(|b| std::mem::take(&mut *b.borrow_mut()));
+        if b.gen > (1u32 << 30) {
+            b.v.clear();
+            b.gen = 0;
+        }
+        if b.v.len() < total {
+            b.v.resize(total, NODE_INIT);
+        }
+        NodeBufGuard { v: b.v, dirty: b.dirty, gen: b.gen, keep }
+    }
+}
+impl Drop for NodeBufGuard {
+    fn drop(&mut self) {
+        for &i in &self.dirty {
+            let n = &mut self.v[i as usize];
+            n.goal = 0;
+            n.tm = false;
+        }
+        self.dirty.clear();
+        if self.v.len() > self.keep {
+            return;
+        }
+        let b = NodeBuf { v: std::mem::take(&mut self.v), dirty: std::mem::take(&mut self.dirty), gen: self.gen };
+        NODE_BUF.with(|c| *c.borrow_mut() = b);
+    }
+}
+
 #[pyclass]
 pub struct NegotiatedRouter {
     base: GridObstacleMap,
@@ -158,6 +209,7 @@ pub struct NegotiatedRouter {
     pres_max: f32, // present-cost cap; history carries on past it
     stop_file: Option<String>, // stop (as on the time limit) once this file exists
     max_expansions: u64,
+    node_buf_keep: usize, // KRT_NEGOTIATED_NODE_BUF_MB per pool thread, in records; 0 = a fresh vector per search
     chunk: usize, // >0: fixed-size chunks routed together (Jacobi inside a chunk); 0: disjoint-window batches
     forbidden: Vec<bool>, // per layer: no track may run on it (KRT layer cost -1: plane layers); vias span it
     // per owner: the cells inside a BGA exclusion zone it may use (KRT's allowed window around each terminal);
@@ -562,15 +614,22 @@ impl NegotiatedRouter {
         } else {
             None
         };
-        let mut nd = vec![Node { g: f32::INFINITY, parent: u32::MAX, closed: 0, goal: 0, dir: 255, tm: false }; total];
-        let mut generation = 0u32;
+        let mut nbuf = if self.node_buf_keep > 0 {
+            NodeBufGuard::take(total, self.node_buf_keep)
+        } else {
+            NodeBufGuard { v: vec![NODE_INIT; total], dirty: Vec::new(), gen: 0, keep: 0 }
+        };
+        let nd = &mut nbuf.v;
+        let mut generation = nbuf.gen;
         let mut expansions = 0u64;
 
         let nt = net.terminals.len();
         for (ti, t) in net.terminals.iter().enumerate() {
             for &(x, y, l) in t {
                 if win.contains(x, y) && (l as usize) < nl {
-                    nd[lidx(x, y, l)].goal = (ti + 1) as u16;
+                    let gi = lidx(x, y, l);
+                    nd[gi].goal = (ti + 1) as u16;
+                    nbuf.dirty.push(gi as u32);
                 }
             }
         }
@@ -582,6 +641,7 @@ impl NegotiatedRouter {
                 let i = lidx(x, y, l);
                 if !nd[i].tm {
                     nd[i].tm = true;
+                    nbuf.dirty.push(i as u32);
                     tree.push(i);
                 }
             }
@@ -617,6 +677,7 @@ impl NegotiatedRouter {
         cnt.add(0, cnt.t0.elapsed().as_nanos() as u64);
         for _round in 1..nt {
             generation += 1;
+            nbuf.gen = generation;
             // heuristic targets: the terminals not joined yet
             let targets: Vec<(f32, f32, f32)> = (0..nt).filter(|&t| !joined[t]).map(|t| net.centres[t]).collect();
             let hfun = |x: i32, y: i32, l: u8| -> f32 {
@@ -770,6 +831,7 @@ impl NegotiatedRouter {
             for &i in &p {
                 if !nd[i].tm {
                     nd[i].tm = true;
+                    nbuf.dirty.push(i as u32);
                     tree.push(i);
                 }
             }
@@ -778,6 +840,7 @@ impl NegotiatedRouter {
                     let i = lidx(x, y, l);
                     if !nd[i].tm {
                         nd[i].tm = true;
+                    nbuf.dirty.push(i as u32);
                         tree.push(i);
                     }
                 }
@@ -1031,6 +1094,7 @@ impl NegotiatedRouter {
             async_mode: false,
             pres_max: 30.0,
             max_expansions: 20_000_000,
+            node_buf_keep: 64 << 20 >> 4,
             chunk: 16,
             forbidden: vec![false; nl],
             allowed: FxHashMap::default(),
@@ -1239,6 +1303,9 @@ impl NegotiatedRouter {
     /// the rest is legal. Returns stats.
     pub fn run<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let t0 = Instant::now();
+        if let Some(mb) = std::env::var("KRT_NEGOTIATED_NODE_BUF_MB").ok().and_then(|v| v.parse::<usize>().ok()) {
+            self.node_buf_keep = (mb << 20) / std::mem::size_of::<Node>();
+        }
         if std::env::var("KRT_NEGOTIATED_CODES").map_or(true, |v| v != "0") {
             self.build_codes();
         }
@@ -1265,6 +1332,7 @@ impl NegotiatedRouter {
         let mut total_exp = 0u64;
         // parallel-round utilisation: per-net search seconds summed, and the rounds' wall seconds summed
         let (mut par_busy, mut par_wall) = (0.0f64, 0.0f64);
+        let slow_s: f64 = std::env::var("KRT_NEGOTIATED_SLOW_S").ok().and_then(|v| v.parse().ok()).unwrap_or(5.0);
         let mut searches = 0u64;
         let mut todo = order.clone();
         // KRT_NEGOTIATED_HEAVY_FIRST=1: each pass after the first is stable-sorted by every net's expansions in its
@@ -1407,11 +1475,12 @@ impl NegotiatedRouter {
                     for t in &timed {
                         last_exp[t.0] += t.2;
                     }
-                    for (ni, _, e, _, s) in &timed {
-                        if *s > 5.0 {
+                    for (ni, p, e, _, s) in &timed {
+                        if *s > slow_s {
                             let net = &self.nets[*ni];
-                            eprintln!("  negotiated pass {iters}: net {} ({} terminals, window {}) took {s:.1} s, {e} expansions",
-                                      net.net_id, net.terminals.len(), if net.full { "full" } else { "bbox" });
+                            eprintln!("  negotiated pass {iters}: net {} ({} terminals, window {}) took {s:.2} s, {e} expansions, {}",
+                                      net.net_id, net.terminals.len(), if net.full { "full" } else { "bbox" },
+                                      if p.is_some() { "found" } else { "failed" });
                         }
                     }
                     let found: Vec<(usize, Option<Vec<Vec<(i32, i32, u8)>>>, u64, usize)> =
@@ -1451,7 +1520,10 @@ impl NegotiatedRouter {
                 }
                 // a window failure retries once on the whole grid (alone: its window overlaps everything)
                 for ni in retry {
+                    let rt = Instant::now();
                     let (p, e) = py.allow_threads(|| self.route_net(ni, pres));
+                    eprintln!("  negotiated pass {iters}: whole-grid retry of net {} took {:.2} s, {e} expansions, {}",
+                              self.nets[ni].net_id, rt.elapsed().as_secs_f64(), if p.is_some() { "found" } else { "failed" });
                     last_exp[ni] += e;
                     total_exp += e;
                     searches += 1;
