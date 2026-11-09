@@ -857,7 +857,9 @@ ROUTE_CLI_ONLY = {
 # replay routed every net), the keepout / guide-corridor layer and spacing
 # flags (controls that were never reset), and --no-fix-drc-settings (its
 # checkbox was a preference no step reset); each left when its fix landed.
-ROUTE_KNOWN_GAPS = {}
+# KNOWN GAP (c10 fork): the shared fab-tier registrar's rung hole clearance.
+_RUNG_HOLE_GAP = {'--rung-hole-clearance': "no control: the fab-tier rung hole clearance (fab_tiers.add_fab_tier_args, default KICAD_HOLE_CLEARANCE) has no GUI field, so a recorded non-default value is lost on replay. 0 recorded uses"}
+ROUTE_KNOWN_GAPS = dict(_RUNG_HOLE_GAP)
 
 # REACHED, but the control is not restored by swig_gui's
 # reset_params_to_defaults, which the plan executor runs before EVERY step: a
@@ -885,9 +887,9 @@ _SAME_AS_ROUTE = ('--debug-lines', '--debug-memory', '--enable-used-layers',
                   '--schematic-dir', '--strict-sizes', '--verbose')
 
 DIFF_CLI_ONLY = {f: ROUTE_CLI_ONLY[f] for f in _SAME_AS_ROUTE}
-# KNOWN GAPS (route_diff.py). EMPTY: --diff-pair-centerline-setback left when
-# it got its converter row, its alias and its reset line.
-DIFF_KNOWN_GAPS = {}
+# KNOWN GAPS (route_diff.py). Only --rung-hole-clearance: --diff-pair-centerline-setback
+# left when it got its converter row, its alias and its reset line.
+DIFF_KNOWN_GAPS = {**_RUNG_HOLE_GAP}
 
 PLANES_CLI_ONLY = dict(
     {f: ROUTE_CLI_ONLY[f] for f in ('--debug-lines', '--enable-used-layers',
@@ -900,20 +902,21 @@ PLANES_CLI_ONLY = dict(
 # (--skip-existing-zones left this list when the planes tab got its "Skip
 # existing zones" box: the tab used to behave as if the flag were ALWAYS
 # given, so a replayed step that omitted it kept a pour the CLI replaced.)
-# KNOWN GAPS (route_planes.py). EMPTY: --min-thickness, --plane-max-iterations
+# KNOWN GAPS (route_planes.py). Only --rung-hole-clearance: --min-thickness, --plane-max-iterations
 # and --voronoi-seed-interval had no control (planes_gui handed create_plane a
 # fixed default for each) until the planes tab's advanced box got one of each,
 # named after the create_plane param and reset to the argparse default.
-PLANES_KNOWN_GAPS = {}
+PLANES_KNOWN_GAPS = {**_RUNG_HOLE_GAP}
 
 BGA_CLI_ONLY = {f: ROUTE_CLI_ONLY[f] for f in ('--enable-used-layers',
                                                '--keep-thermal', '--output',
                                                '--strict-sizes')}
-# KNOWN GAPS (bga_fanout.py). EMPTY: --diff-pairs and --diff-pair-gap left
+# KNOWN GAPS (bga_fanout.py, qfn_fanout.py: the shared fab-tier registrar). Only
+# --rung-hole-clearance: --diff-pairs and --diff-pair-gap left
 # when the BGA panel got its Coupled pairs field and its own coupled-pair gap
 # (51 kept corpus steps on 36 boards carry both), and --primary-escape when
 # _set_control learned to set a RadioBox by label and the reset restored it.
-BGA_KNOWN_GAPS = {}
+BGA_KNOWN_GAPS = {**_RUNG_HOLE_GAP}
 
 QFN_CLI_ONLY = {f: ROUTE_CLI_ONLY[f] for f in ('--enable-used-layers',
                                                '--keep-thermal', '--output',
@@ -952,7 +955,7 @@ FLAG_COVERAGE = {
         action='fanout',
         probe=['python3', 'py_router/qfn_fanout.py', 'in.kicad_pcb',
                'out.kicad_pcb', '--component', 'U1', '--nets', 'PROBE_NET'],
-        cli_only=QFN_CLI_ONLY, known_gaps={}, reset_gaps={}),
+        cli_only=QFN_CLI_ONLY, known_gaps=dict(_RUNG_HOLE_GAP), reset_gaps={}),
 }
 
 # The wx classes that reach the executor's `hasattr(ctrl, "SetValue")`
