@@ -26,8 +26,8 @@ use numpy::PyReadonlyArray2;
 use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
-use std::sync::atomic::{AtomicU16, Ordering as AO};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU16, AtomicU64, Ordering as AO};
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use crate::obstacle_map::GridObstacleMap;
@@ -38,7 +38,7 @@ const NONE: i32 = -1;
 const MULTI: i32 = -2;
 const DIRS: [(i32, i32); 8] = [(1, 0), (1, -1), (0, -1), (-1, -1), (-1, 0), (-1, 1), (0, 1), (1, 1)];
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 struct Win {
     x0: i32,
     y0: i32,
@@ -71,6 +71,29 @@ struct Net {
     own_vias: Vec<(i32, i32)>,     // the net's existing vias: new vias keep r_vv from them
     corridor: Vec<(i32, i32, i32, i32, u32)>, // global-plan corridor: cell rects x0, y0, x1, y1 and a layer bit mask
     cfac: f32,                     // cost factor on cells outside the corridor (1: no corridor)
+}
+
+/// A net's static cost-to-go: for every cell of its search window and layer, the least cost of reaching any of its
+/// terminals but the first (the search's initial tree) on the static map -- tracks of one unit per orthogonal cell
+/// (sqrt 2 diagonal), vias at via_cost, no congestion, history, turns or corridor, every move the search may make
+/// allowed (other owners' keep-outs, hard copper and BGA zones as track_ok/via_ok see them, plane layers only by via).
+/// Every one of those terms only adds cost in the search, so the field never exceeds the true cost to the nearest
+/// unjoined terminal. Stored coarse: each s x s block keeps the minimum of its cells, still a lower bound.
+struct Field {
+    win: Win,
+    s: i32,
+    cw: usize,
+    ch: usize,
+    d: Vec<f32>,
+}
+
+impl Field {
+    #[inline]
+    fn at(&self, x: i32, y: i32, l: u8) -> f32 {
+        let bx = ((x - self.win.x0) / self.s) as usize;
+        let by = ((y - self.win.y0) / self.s) as usize;
+        self.d[l as usize * self.cw * self.ch + by * self.cw + bx]
+    }
 }
 
 #[derive(Clone, Default)]
@@ -141,6 +164,26 @@ pub struct NegotiatedRouter {
     // the zone blocks every other cell on every layer, tracks and vias alike
     allowed: FxHashMap<i32, FxHashSet<u64>>,
     log: Vec<String>,
+    field_s: i32, // KRT_NEGOTIATED_FIELD: block size of the per-net cost-to-go field (0: octile heuristic only)
+    fields: Vec<OnceLock<Option<Field>>>, // per net, built at its first search and reused every pass
+    field_ns: AtomicU64,
+    field_bytes: AtomicU64,
+    // per (layer, cell): bit 0 hard track block, bit 1 BGA zone; per cell the same for vias (run() builds them from
+    // the base map, which never changes after construction; empty = ask the base map)
+    scode: Vec<u8>,
+    vcode: Vec<u8>,
+}
+
+/// One window cell of a search: g, parent, closed stamp (generation * 2 closed, generation * 2 - 1 g valid), the
+/// terminal index + 1, the arrival direction (255 = none / via) and the tree mark.
+#[derive(Clone, Copy)]
+struct Node {
+    g: f32,
+    parent: u32,
+    closed: u32,
+    goal: u16,
+    dir: u8,
+    tm: bool,
 }
 
 impl NegotiatedRouter {
@@ -159,9 +202,14 @@ impl NegotiatedRouter {
 
     #[inline]
     fn track_ok(&self, owner: i32, x: i32, y: i32, l: u8, c: usize) -> bool {
-        let o = self.owner_t[l as usize * self.plane() + c];
+        let k = l as usize * self.plane() + c;
+        let o = self.owner_t[k];
         if o != NONE && o != owner {
             return false;
+        }
+        if !self.scode.is_empty() {
+            let s = self.scode[k];
+            return s == 0 || (s == 2 && self.zone_allowed(owner, x, y));
         }
         if self.base.is_blocked_hard(x, y, l as usize) {
             return false;
@@ -204,6 +252,10 @@ impl NegotiatedRouter {
         if o != NONE && o != owner {
             return false;
         }
+        if !self.vcode.is_empty() {
+            let s = self.vcode[c];
+            return s == 0 || (s == 2 && self.zone_allowed(owner, x, y));
+        }
         if self.base.is_via_blocked_hard(x, y) {
             return false;
         }
@@ -230,6 +282,27 @@ impl NegotiatedRouter {
                 mask[(ny - win.y0) as usize * ww + (nx - win.x0) as usize] = true;
             }
         }
+    }
+
+    /// The static codes track_ok / via_ok read (see the scode field): the base map's answers, cell by cell.
+    fn build_codes(&mut self) {
+        let plane = self.plane();
+        let nl = self.nl;
+        let mut sc = vec![0u8; plane * nl];
+        let mut vc = vec![0u8; plane];
+        for dy in 0..self.h {
+            for dx in 0..self.w {
+                let (x, y) = (self.x0 + dx, self.y0 + dy);
+                let c = dy as usize * self.w as usize + dx as usize;
+                let zone = (self.base.in_bga_zone(x, y) as u8) << 1;
+                for l in 0..nl {
+                    sc[l * plane + c] = self.base.is_blocked_hard(x, y, l) as u8 | zone;
+                }
+                vc[c] = self.base.is_via_blocked_hard(x, y) as u8 | zone;
+            }
+        }
+        self.scode = sc;
+        self.vcode = vc;
     }
 
     fn grid_win(&self) -> Win {
@@ -261,6 +334,113 @@ impl NegotiatedRouter {
     }
 
     /// The Steiner search; `diag` asks for the failure diagnosis (None when a tree was found).
+    /// The net's cost-to-go field on its window (see Field); None for a one-terminal net or with the field off.
+    fn build_field(&self, ni: usize) -> Option<Field> {
+        let net = &self.nets[ni];
+        let nt = net.terminals.len();
+        if nt < 2 || self.field_s <= 0 {
+            return None;
+        }
+        let win = self.window(net);
+        let (ww, wh) = (win.w() as usize, win.h() as usize);
+        let nl = self.nl;
+        let wplane = ww * wh;
+        let total = wplane * nl;
+        let lidx = |x: i32, y: i32, l: usize| -> usize {
+            l * wplane + (y - win.y0) as usize * ww + (x - win.x0) as usize
+        };
+        let mut term = vec![false; total];
+        for t in &net.terminals {
+            for &(x, y, l) in t {
+                if win.contains(x, y) && (l as usize) < nl {
+                    term[lidx(x, y, l as usize)] = true;
+                }
+            }
+        }
+        // a cell the search may stand on: a terminal cell, or a track cell track_ok admits on a track layer
+        let mut enter = vec![false; total];
+        let mut vok = vec![false; wplane];
+        for y in win.y0..=win.y1 {
+            for x in win.x0..=win.x1 {
+                let c = match self.cell(x, y) { Some(c) => c, None => continue };
+                vok[(y - win.y0) as usize * ww + (x - win.x0) as usize] = self.via_ok_net(net, x, y, c);
+                for l in 0..nl {
+                    let i = lidx(x, y, l);
+                    enter[i] = term[i] || (!self.forbidden[l] && self.track_ok(net.owner, x, y, l as u8, c));
+                }
+            }
+        }
+        let mut dist = vec![f32::INFINITY; total];
+        let mut heap = BinaryHeap::new();
+        for t in &net.terminals[1..] {
+            for &(x, y, l) in t {
+                if win.contains(x, y) && (l as usize) < nl {
+                    let i = lidx(x, y, l as usize);
+                    if dist[i] > 0.0 {
+                        dist[i] = 0.0;
+                        heap.push(Open { f: 0.0, g: 0.0, idx: i as u32 });
+                    }
+                }
+            }
+        }
+        // reverse Dijkstra: settling u relaxes every v with a forward move v -> u (u is a terminal or enterable)
+        while let Some(Open { g: d, idx, .. }) = heap.pop() {
+            let u = idx as usize;
+            if d > dist[u] {
+                continue;
+            }
+            let l = u / wplane;
+            let r = u % wplane;
+            let (x, y) = (win.x0 + (r % ww) as i32, win.y0 + (r / ww) as i32);
+            if !self.forbidden[l] {
+                for &(dx, dy) in DIRS.iter() {
+                    let (nx, ny) = (x + dx, y + dy);
+                    if !win.contains(nx, ny) {
+                        continue;
+                    }
+                    let v = lidx(nx, ny, l);
+                    if !enter[v] {
+                        continue;
+                    }
+                    let nd = d + if dx != 0 && dy != 0 { 1.41421356 } else { 1.0 };
+                    if nd < dist[v] {
+                        dist[v] = nd;
+                        heap.push(Open { f: nd, g: nd, idx: v as u32 });
+                    }
+                }
+            }
+            if nl > 1 && vok[r] {
+                let nd = d + self.via_cost;
+                for l2 in 0..nl {
+                    if l2 == l {
+                        continue;
+                    }
+                    let v = l2 * wplane + r;
+                    if enter[v] && nd < dist[v] {
+                        dist[v] = nd;
+                        heap.push(Open { f: nd, g: nd, idx: v as u32 });
+                    }
+                }
+            }
+        }
+        let bs = self.field_s;
+        let cw = (ww + bs as usize - 1) / bs as usize;
+        let ch = (wh + bs as usize - 1) / bs as usize;
+        let mut cd = vec![f32::INFINITY; cw * ch * nl];
+        for l in 0..nl {
+            for ry in 0..wh {
+                for rx in 0..ww {
+                    let v = dist[l * wplane + ry * ww + rx];
+                    let k = l * cw * ch + (ry / bs as usize) * cw + rx / bs as usize;
+                    if v < cd[k] {
+                        cd[k] = v;
+                    }
+                }
+            }
+        }
+        Some(Field { win, s: bs, cw, ch, d: cd })
+    }
+
     fn search_net(&self, ni: usize, pres: f32, full: bool, diag: bool)
         -> (Option<Vec<Vec<(i32, i32, u8)>>>, u64, Option<(usize, bool, Vec<(usize, f32, i32, i32, u8)>)>) {
         let net = &self.nets[ni];
@@ -339,12 +519,21 @@ impl NegotiatedRouter {
                 _ => 1.0,
             }
         };
-        let mut g = vec![f32::INFINITY; total];
-        let mut parent = vec![u32::MAX; total];
-        let mut dir = vec![255u8; total];
-        let mut closed = vec![0u32; total];
-        let mut goal = vec![0u16; total]; // terminal index + 1
-        let mut tree_mark = vec![false; total];
+        // the cost-to-go field, when this search runs on the window it was built on
+        let field: Option<&Field> = if self.field_s > 0 {
+            self.fields[ni].get_or_init(|| {
+                let t = Instant::now();
+                let f = self.build_field(ni);
+                self.field_ns.fetch_add(t.elapsed().as_nanos() as u64, AO::Relaxed);
+                if let Some(f) = &f {
+                    self.field_bytes.fetch_add((f.d.len() * 4) as u64, AO::Relaxed);
+                }
+                f
+            }).as_ref().filter(|f| f.win == win)
+        } else {
+            None
+        };
+        let mut nd = vec![Node { g: f32::INFINITY, parent: u32::MAX, closed: 0, goal: 0, dir: 255, tm: false }; total];
         let mut generation = 0u32;
         let mut expansions = 0u64;
 
@@ -352,19 +541,18 @@ impl NegotiatedRouter {
         for (ti, t) in net.terminals.iter().enumerate() {
             for &(x, y, l) in t {
                 if win.contains(x, y) && (l as usize) < nl {
-                    goal[lidx(x, y, l)] = (ti + 1) as u16;
+                    nd[lidx(x, y, l)].goal = (ti + 1) as u16;
                 }
             }
         }
-        let is_term = |i: usize| goal[i] != 0;
         let mut joined = vec![false; nt];
         joined[0] = true;
         let mut tree: Vec<usize> = Vec::new();
         for &(x, y, l) in &net.terminals[0] {
             if win.contains(x, y) && (l as usize) < nl {
                 let i = lidx(x, y, l);
-                if !tree_mark[i] {
-                    tree_mark[i] = true;
+                if !nd[i].tm {
+                    nd[i].tm = true;
                     tree.push(i);
                 }
             }
@@ -400,7 +588,7 @@ impl NegotiatedRouter {
             generation += 1;
             // heuristic targets: the terminals not joined yet
             let targets: Vec<(f32, f32, f32)> = (0..nt).filter(|&t| !joined[t]).map(|t| net.centres[t]).collect();
-            let hfun = |x: i32, y: i32| -> f32 {
+            let hfun = |x: i32, y: i32, l: u8| -> f32 {
                 let mut best = f32::INFINITY;
                 for &(cx, cy, r) in &targets {
                     let dx = (x as f32 - cx).abs();
@@ -411,42 +599,46 @@ impl NegotiatedRouter {
                         best = d;
                     }
                 }
-                best.max(0.0) * self.h_weight
+                best = best.max(0.0);
+                if let Some(f) = field {
+                    best = best.max(f.at(x, y, l));
+                }
+                best * self.h_weight
             };
             let mut heap = BinaryHeap::new();
             for &i in &tree {
-                g[i] = 0.0;
-                parent[i] = u32::MAX;
-                dir[i] = 255;
-                let (x, y, _) = decode(i);
-                heap.push(Open { f: hfun(x, y), g: 0.0, idx: i as u32 });
+                nd[i].g = 0.0;
+                nd[i].parent = u32::MAX;
+                nd[i].dir = 255;
+                let (x, y, l) = decode(i);
+                heap.push(Open { f: hfun(x, y, l), g: 0.0, idx: i as u32 });
             }
-            // closed[] semantics: closed[i] == generation*2 means closed; == generation*2-1 means g valid
+            // closed semantics: closed == generation*2 means closed; == generation*2-1 means g valid
             for &i in &tree {
-                closed[i] = generation * 2 - 1;
+                nd[i].closed = generation * 2 - 1;
             }
             let mut found: Option<usize> = None;
             while let Some(Open { g: gc, idx, .. }) = heap.pop() {
                 let i = idx as usize;
-                if closed[i] == generation * 2 {
+                if nd[i].closed == generation * 2 {
                     continue;
                 }
-                if gc > g[i] {
+                if gc > nd[i].g {
                     continue;
                 }
-                closed[i] = generation * 2;
+                nd[i].closed = generation * 2;
                 expansions += 1;
                 if expansions > self.max_expansions {
-                    let d = if diag { Some(self.diagnose(net, &joined, true, &closed, generation, total, &decode)) } else { None };
+                    let d = if diag { Some(self.diagnose(net, &joined, true, &nd, generation, total, &decode)) } else { None };
                     return (None, expansions, d);
                 }
-                let t = goal[i];
+                let t = nd[i].goal;
                 if t != 0 && !joined[(t - 1) as usize] {
                     found = Some(i);
                     break;
                 }
                 let (x, y, l) = decode(i);
-                let d0 = dir[i];
+                let d0 = nd[i].dir;
                 // planar moves (none along a forbidden layer: a plane layer is reached only through a via, at a
                 // terminal that lives there)
                 for (di, &(dx, dy)) in DIRS.iter().enumerate() {
@@ -459,11 +651,12 @@ impl NegotiatedRouter {
                         continue;
                     }
                     let j = lidx(nx, ny, l);
-                    if closed[j] == generation * 2 {
+                    let nj = nd[j];
+                    if nj.closed == generation * 2 {
                         continue;
                     }
                     let c = match self.cell(nx, ny) { Some(c) => c, None => continue };
-                    if !is_term(j) && !tree_mark[j] && !step_ok(j, x, y, nx, ny, l, c) {
+                    if nj.goal == 0 && !nj.tm && !step_ok(j, x, y, nx, ny, l, c) {
                         continue;
                     }
                     let len = if dx != 0 && dy != 0 { 1.41421356 } else { 1.0 };
@@ -472,13 +665,14 @@ impl NegotiatedRouter {
                         step += self.turn_cost;
                     }
                     let ng = gc + step;
-                    let valid = closed[j] == generation * 2 - 1;
-                    if !valid || ng < g[j] {
-                        g[j] = ng;
-                        parent[j] = i as u32;
-                        dir[j] = di as u8;
-                        closed[j] = generation * 2 - 1;
-                        heap.push(Open { f: ng + hfun(nx, ny), g: ng, idx: j as u32 });
+                    let valid = nj.closed == generation * 2 - 1;
+                    if !valid || ng < nj.g {
+                        let m = &mut nd[j];
+                        m.g = ng;
+                        m.parent = i as u32;
+                        m.dir = di as u8;
+                        m.closed = generation * 2 - 1;
+                        heap.push(Open { f: ng + hfun(nx, ny, l), g: ng, idx: j as u32 });
                     }
                 }
                 // via: through via to every other layer (not within r_vv of the net's own vias)
@@ -495,21 +689,23 @@ impl NegotiatedRouter {
                                 continue;
                             }
                             let j = lidx(x, y, l2);
-                            if closed[j] == generation * 2 {
+                            let nj = nd[j];
+                            if nj.closed == generation * 2 {
                                 continue;
                             }
-                            if !is_term(j) && !tree_mark[j]
+                            if nj.goal == 0 && !nj.tm
                                 && (self.forbidden[l2 as usize] || !step_ok(j, x, y, x, y, l2, c)) {
                                 continue;
                             }
                             let ng = gc + vstep * cf(j);
-                            let valid = closed[j] == generation * 2 - 1;
-                            if !valid || ng < g[j] {
-                                g[j] = ng;
-                                parent[j] = i as u32;
-                                dir[j] = 255;
-                                closed[j] = generation * 2 - 1;
-                                heap.push(Open { f: ng + hfun(x, y), g: ng, idx: j as u32 });
+                            let valid = nj.closed == generation * 2 - 1;
+                            if !valid || ng < nj.g {
+                                let m = &mut nd[j];
+                                m.g = ng;
+                                m.parent = i as u32;
+                                m.dir = 255;
+                                m.closed = generation * 2 - 1;
+                                heap.push(Open { f: ng + hfun(x, y, l2), g: ng, idx: j as u32 });
                             }
                         }
                     }
@@ -518,31 +714,31 @@ impl NegotiatedRouter {
             let end = match found {
                 Some(e) => e,
                 None => {
-                    let d = if diag { Some(self.diagnose(net, &joined, false, &closed, generation, total, &decode)) } else { None };
+                    let d = if diag { Some(self.diagnose(net, &joined, false, &nd, generation, total, &decode)) } else { None };
                     return (None, expansions, d);
                 }
             };
-            let ti = (goal[end] - 1) as usize;
+            let ti = (nd[end].goal - 1) as usize;
             joined[ti] = true;
             // path back to the tree
             let mut p = vec![end];
             let mut cur = end;
-            while parent[cur] != u32::MAX {
-                cur = parent[cur] as usize;
+            while nd[cur].parent != u32::MAX {
+                cur = nd[cur].parent as usize;
                 p.push(cur);
             }
             p.reverse();
             for &i in &p {
-                if !tree_mark[i] {
-                    tree_mark[i] = true;
+                if !nd[i].tm {
+                    nd[i].tm = true;
                     tree.push(i);
                 }
             }
             for &(x, y, l) in &net.terminals[ti] {
                 if win.contains(x, y) && (l as usize) < nl {
                     let i = lidx(x, y, l);
-                    if !tree_mark[i] {
-                        tree_mark[i] = true;
+                    if !nd[i].tm {
+                        nd[i].tm = true;
                         tree.push(i);
                     }
                 }
@@ -563,7 +759,7 @@ impl NegotiatedRouter {
 
     /// The failure diagnosis of one search: terminals joined, the cap flag, and for every terminal not joined the
     /// reached cell (closed or opened in this round) nearest to its centre.
-    fn diagnose(&self, net: &Net, joined: &[bool], cap: bool, closed: &[u32], generation: u32, total: usize,
+    fn diagnose(&self, net: &Net, joined: &[bool], cap: bool, nd: &[Node], generation: u32, total: usize,
                 decode: &dyn Fn(usize) -> (i32, i32, u8)) -> (usize, bool, Vec<(usize, f32, i32, i32, u8)>) {
         let mut near = Vec::new();
         for (ti, &j) in joined.iter().enumerate() {
@@ -573,7 +769,7 @@ impl NegotiatedRouter {
             let (cx, cy, r) = net.centres[ti];
             let mut best: (f32, i32, i32, u8) = (f32::INFINITY, 0, 0, 0);
             for i in 0..total {
-                if closed[i] < generation * 2 - 1 {
+                if nd[i].closed < generation * 2 - 1 {
                     continue;
                 }
                 let (x, y, l) = decode(i);
@@ -800,6 +996,12 @@ impl NegotiatedRouter {
             forbidden: vec![false; nl],
             allowed: FxHashMap::default(),
             log: Vec::new(),
+            field_s: std::env::var("KRT_NEGOTIATED_FIELD").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(0),
+            fields: Vec::new(),
+            field_ns: AtomicU64::new(0),
+            field_bytes: AtomicU64::new(0),
+            scode: Vec::new(),
+            vcode: Vec::new(),
         })
     }
 
@@ -958,6 +1160,7 @@ impl NegotiatedRouter {
                              own_vias: own_vias.unwrap_or_default(), corridor: Vec::new(), cfac: 1.0 });
         self.routes.push(None);
         self.unroutable.push(false);
+        self.fields.push(OnceLock::new());
         Ok(self.nets.len() - 1)
     }
 
@@ -996,6 +1199,9 @@ impl NegotiatedRouter {
     /// the rest is legal. Returns stats.
     pub fn run<'py>(&mut self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
         let t0 = Instant::now();
+        if std::env::var("KRT_NEGOTIATED_CODES").map_or(true, |v| v != "0") {
+            self.build_codes();
+        }
         let n = self.nets.len();
         let dvv = Self::disk(self.r_vv);
         // per-net paint disks (the parameters are final now): a wide net paints r_tt + 2 extra around its tracks
@@ -1017,8 +1223,15 @@ impl NegotiatedRouter {
         let mut pres = self.pres0;
         let mut iters = 0u32;
         let mut total_exp = 0u64;
+        // parallel-round utilisation: per-net search seconds summed, and the rounds' wall seconds summed
+        let (mut par_busy, mut par_wall) = (0.0f64, 0.0f64);
         let mut searches = 0u64;
         let mut todo = order.clone();
+        // KRT_NEGOTIATED_HEAVY_FIRST=1: each pass after the first is stable-sorted by every net's expansions in its
+        // last pass (the shuffle breaks ties), so the heavy nets share chunks and run side by side instead of one per
+        // chunk (a chunk lasts as long as its slowest net; 8% of the cores were busy on cm5io, 2026-11-09)
+        let heavy_first = std::env::var("KRT_NEGOTIATED_HEAVY_FIRST").map_or(false, |v| v != "0" && !v.is_empty());
+        let mut last_exp = vec![0u64; n];
         let mut last_conflicts = usize::MAX;
         let mut stopped = "converged";
         loop {
@@ -1109,6 +1322,9 @@ impl NegotiatedRouter {
                         todo.swap(i, (s % (i as u64 + 1)) as usize);
                     }
                 }
+                if heavy_first && iters > 1 {
+                    todo.sort_by(|a, b| last_exp[*b].cmp(&last_exp[*a]));
+                }
                 todo.chunks(self.chunk).map(|c| c.to_vec()).collect()
             } else {
                 self.batches(&todo)
@@ -1121,6 +1337,7 @@ impl NegotiatedRouter {
                 }
                 let batch_t = Instant::now();
                 for &ni in &batch {
+                    last_exp[ni] = 0;
                     if let Some(r) = self.routes[ni].take() {
                         self.unpaint(&r);
                     }
@@ -1134,6 +1351,7 @@ impl NegotiatedRouter {
                 let mut first_round = true;
                 while !round.is_empty() {
                     let me: &Self = self;
+                    let rt0 = Instant::now();
                     let timed: Vec<(usize, Option<Vec<Vec<(i32, i32, u8)>>>, u64, usize, f64)> = py.allow_threads(|| {
                         pool.install(|| {
                             round.par_iter().map(|&ni| {
@@ -1144,6 +1362,11 @@ impl NegotiatedRouter {
                             }).collect()
                         })
                     });
+                    par_wall += rt0.elapsed().as_secs_f64();
+                    par_busy += timed.iter().map(|t| t.4).sum::<f64>();
+                    for t in &timed {
+                        last_exp[t.0] += t.2;
+                    }
                     for (ni, _, e, _, s) in &timed {
                         if *s > 5.0 {
                             let net = &self.nets[*ni];
@@ -1189,6 +1412,7 @@ impl NegotiatedRouter {
                 // a window failure retries once on the whole grid (alone: its window overlaps everything)
                 for ni in retry {
                     let (p, e) = py.allow_threads(|| self.route_net(ni, pres));
+                    last_exp[ni] += e;
                     total_exp += e;
                     searches += 1;
                     match p {
@@ -1294,6 +1518,11 @@ impl NegotiatedRouter {
         d.set_item("stopped", stopped)?;
         d.set_item("seconds", t0.elapsed().as_secs_f64())?;
         d.set_item("expansions", total_exp)?;
+        d.set_item("field_s", self.field_ns.load(AO::Relaxed) as f64 * 1e-9)?;
+        d.set_item("par_busy_s", par_busy)?;
+        d.set_item("par_wall_s", par_wall)?;
+        d.set_item("threads", pool.current_num_threads())?;
+        d.set_item("field_mb", self.field_bytes.load(AO::Relaxed) as f64 / 1048576.0)?;
         d.set_item("searches", searches)?;
         d.set_item("routed", self.routes.iter().filter(|r| r.is_some()).count())?;
         d.set_item("unroutable", self.nets.iter().zip(&self.unroutable).filter(|(_, &u)| u).map(|(n, _)| n.net_id).collect::<Vec<_>>())?;
