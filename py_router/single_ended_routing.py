@@ -129,7 +129,7 @@ def _foreign_pad_arrays(pcb_data, layer):
     # the iteration boards). Mirror the seg/via caches: signature tuple +
     # setattr REBIND on mismatch, so each pcb_data view owns its arrays.
     _sig = (id(pcb_data.pads_by_net),
-            sum(len(v) for v in pcb_data.pads_by_net.values()))
+            sum(map(len, pcb_data.pads_by_net.values())))
     cache = getattr(pcb_data, '_foreign_pad_arr_cache', None)
     if cache is None or not isinstance(cache, tuple) or cache[0] != _sig:
         cache = (_sig, {})
@@ -1248,7 +1248,7 @@ def _foreign_hole_capsules(pcb_data):
     the 0.0 that every other corpus NPTH pad carries."""
     from check_drc import _pad_has_no_copper
     from kicad_parser import pad_drill_capsule
-    sig = sum(len(p) for p in pcb_data.pads_by_net.values())
+    sig = sum(map(len, pcb_data.pads_by_net.values()))
     cache = getattr(pcb_data, '_foreign_hole_cap_cache', None)
     if cache is None or cache[0] != sig:
         nid, ax, ay, bx, by, r, lc = [], [], [], [], [], [], []
