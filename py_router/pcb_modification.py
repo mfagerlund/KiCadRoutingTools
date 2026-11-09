@@ -6382,8 +6382,9 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
                         # chains/nets must see this one's copper at its new place.
                         pcb_data.segments = [s for s in pcb_data.segments
                                              if id(s) not in _rm] + new_chain_segs
-                        if hasattr(pcb_data, '_foreign_seg_arr_cache'):
-                            pcb_data._foreign_seg_arr_cache = None
+                        # the cached foreign-copper rows follow the splice (exact, or dropped)
+                        from single_ended_routing import _foreign_seg_arrays_splice
+                        _foreign_seg_arrays_splice(pcb_data, _rm, new_chain_segs)
                         net_segs = trial
                         net_changed = True
             if net_changed:
