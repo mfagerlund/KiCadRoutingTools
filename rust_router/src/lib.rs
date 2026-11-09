@@ -17,6 +17,7 @@ mod router;
 mod dubins;
 mod pose_router;
 mod pathfinder;
+mod clearance;
 
 pub use obstacle_map::GridObstacleMap;
 pub use router::GridRouter;
@@ -146,6 +147,8 @@ fn grid_router(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<GridRouter>()?;
     m.add_class::<PoseRouter>()?;
     m.add_class::<NegotiatedRouter>()?;
+    m.add_function(wrap_pyfunction!(clearance::seg_dist_need, m)?)?;
+    m.add_function(wrap_pyfunction!(clearance::pad_dist_need, m)?)?;
     m.add_function(wrap_pyfunction!(identify_blocking_obstacles, m)?)?;
     Ok(())
 }

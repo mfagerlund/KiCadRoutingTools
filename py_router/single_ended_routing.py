@@ -176,10 +176,11 @@ def _foreign_pad_arrays(pcb_data, layer):
                         rc.append(1.0); rs.append(0.0)
                         ex.append(half_x); ey.append(half_y)
                     lc.append(getattr(pad, 'local_clearance', 0.0) or 0.0)
-        arr = (np.asarray(nids, dtype=np.int64), np.asarray(cx), np.asarray(cy),
-               np.asarray(hx), np.asarray(hy), np.asarray(cr),
-               np.asarray(rc), np.asarray(rs), np.asarray(ex), np.asarray(ey),
-               np.asarray(lc), custom)
+        # float64 columns even for integer coordinates (a hand-built board): the Rust kernel takes f64 only
+        arr = (np.asarray(nids, dtype=np.int64), np.asarray(cx, dtype=float), np.asarray(cy, dtype=float),
+               np.asarray(hx, dtype=float), np.asarray(hy, dtype=float), np.asarray(cr, dtype=float),
+               np.asarray(rc, dtype=float), np.asarray(rs, dtype=float), np.asarray(ex, dtype=float),
+               np.asarray(ey, dtype=float), np.asarray(lc, dtype=float), custom)
         cache[layer] = arr
     return arr
 
@@ -340,6 +341,24 @@ def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
     nids, cx, cy, hx, hy, cr, rc, rs, ex, ey, plc, custom = \
         _foreign_pad_arrays(pcb_data, layer)
     n = max(2, int(math.hypot(x2 - x1, y2 - y1) / 0.02) + 1)
+    if need is not None and _RUST_PAD_NEED is not None and not custom:
+        # the need path in one Rust call over the rounded-rect pads (numpy's arithmetic, 2026-11-09)
+        tab = None
+        if base_clearance is not None and net_clearances:
+            tab = _net_excess_table(net_clearances, None, base_clearance)
+        if tab is not None or base_clearance is None or not net_clearances:
+            r = _RUST_PAD_NEED(float(x1), float(y1), float(x2), float(y2), int(net_id), nids, cx, cy, hx, hy, cr,
+                               rc, rs, ex, ey, plc, None if base_clearance is None else float(base_clearance), tab,
+                               float(need), float(_FOREIGN_PAD_WINDOW), int(n))
+            if not _RUST_SEG_CHECK:
+                return r
+            _RUST_SEG_COUNTS[0] += 1
+            ref = _seg_foreign_pad_dist_numpy(pcb_data, net_id, x1, y1, x2, y2, layer, base_clearance,
+                                              net_clearances, need)
+            if (r < need) != (ref < need) or (ref < need and r != ref):
+                raise AssertionError(f'pad_dist_need: rust {r!r} numpy {ref!r} need {need!r} net {net_id} '
+                                     f'({x1},{y1})-({x2},{y2}) {layer}')
+            return r
     _t = np.linspace(0.0, 1.0, n + 1)
     sx = x1 + (x2 - x1) * _t
     sy = y1 + (y2 - y1) * _t
@@ -441,6 +460,80 @@ def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
 _LAYER_OF = operator.attrgetter('layer')  # the #803 digest's layer tuple, built in C (same tuple, same hash)
 
 
+def _foreign_seg_sig(pcb_data):
+    """_foreign_seg_arrays' cache signature (see there): counts, list identities and tails, plus the #803 whole-list
+    digest unless the caller declared the cache trusted."""
+    segs, vias = pcb_data.segments, pcb_data.vias
+    tail = segs[-1] if segs else None
+    vtail = vias[-1] if vias else None
+    sig = (len(segs), len(vias), id(segs), id(vias),
+           (tail.start_x, tail.start_y, tail.end_x, tail.end_y,
+            tail.layer, tail.width, tail.net_id) if tail is not None else None,
+           (vtail.x, vtail.y, vtail.size, vtail.net_id) if vtail is not None else None)
+    if not getattr(pcb_data, '_foreign_seg_arr_trust', False):
+        sig = sig + (sum(map(id, segs)), sum(map(id, vias)),
+                     hash(tuple(map(_LAYER_OF, segs))))
+    return sig
+
+
+def _seg_rows(segs):
+    """The per-segment rows of _foreign_seg_arrays' snapshot: layer, net, start, end, half width."""
+    return (np.asarray([s.layer for s in segs], dtype=object),
+            np.asarray([s.net_id for s in segs], dtype=np.int64),
+            np.asarray([s.start_x for s in segs], dtype=float),
+            np.asarray([s.start_y for s in segs], dtype=float),
+            np.asarray([s.end_x for s in segs], dtype=float),
+            np.asarray([s.end_y for s in segs], dtype=float),
+            np.asarray([(s.width if s.width > 0 else 0.0) / 2.0 for s in segs], dtype=float))
+
+
+_SPLICE_CHECK = os.environ.get('KRT_SPLICE_CHECK', '0') == '1'
+_SPLICE_COUNTS = [0, 0]     # patched, dropped (printed at exit under KRT_SPLICE_CHECK)
+if _SPLICE_CHECK:
+    import atexit as _atexit
+    _atexit.register(lambda: print(f"[splice-check] foreign-seg snapshot patched {_SPLICE_COUNTS[0]}, "
+                                   f"dropped {_SPLICE_COUNTS[1]}, every patch equal to a fresh rebuild", flush=True))
+
+
+def _foreign_seg_arrays_splice(pcb_data, removed_ids, added):
+    """Call right after `pcb_data.segments = [s for s in old if id(s) not in removed_ids] + added` (vias unchanged):
+    patch the cached snapshot to the rows a fresh rebuild would give -- the kept rows in order, then the added -- in
+    place of dropping it (smoothing spliced once per commit and rebuilt the whole snapshot each time: 5.3 s of
+    cm5io's route stage, 14.2 s of stmp157's, 2026-11-09). Drops the cache instead when it cannot patch exactly:
+    no snapshot, vias changed, net-tie graphic copper (positional rows), or a count that does not add up."""
+    cache = getattr(pcb_data, '_foreign_seg_arr_cache', None)
+    if cache is None:
+        return
+    per_layer = cache[1]
+    snap, ids, vkey = per_layer.get('_all'), per_layer.get('_ids'), per_layer.get('_vkey')
+    vias = pcb_data.vias
+    if (snap is None or ids is None or vkey != (id(vias), len(vias)) or snap[11]
+            or any(getattr(s, 'graphic', False) for s in added)):
+        pcb_data._foreign_seg_arr_cache = None
+        _SPLICE_COUNTS[1] += 1
+        return
+    rm = np.fromiter(removed_ids, dtype=np.int64, count=len(removed_ids)) if removed_ids else None
+    keep = ~np.isin(ids, rm) if rm is not None else np.ones(ids.size, dtype=bool)
+    if int(keep.sum()) + len(added) != len(pcb_data.segments):
+        pcb_data._foreign_seg_arr_cache = None
+        _SPLICE_COUNTS[1] += 1
+        return
+    rows = _seg_rows(added)
+    new = tuple(np.concatenate((a[keep], b)) for a, b in zip(snap[:7], rows))
+    snap2 = new + tuple(snap[7:11]) + ([],)
+    ids2 = np.concatenate((ids[keep], np.fromiter((id(s) for s in added), dtype=np.int64, count=len(added))))
+    if _SPLICE_CHECK:
+        fresh = _seg_rows(pcb_data.segments)
+        for k, (a, b) in enumerate(zip(new, fresh)):
+            if a.dtype != b.dtype or a.shape != b.shape or not (a == b).all():
+                raise AssertionError(f'_foreign_seg_arrays_splice: column {k} differs from a fresh rebuild')
+        if not (ids2 == np.asarray([id(x) for x in pcb_data.segments], dtype=np.int64)).all():
+            raise AssertionError('_foreign_seg_arrays_splice: row ids differ from a fresh rebuild')
+    _SPLICE_COUNTS[0] += 1
+    pcb_data._foreign_seg_arr_cache = (_foreign_seg_sig(pcb_data),
+                                       {'_all': snap2, '_ids': ids2, '_vkey': (id(vias), len(vias))})
+
+
 def _foreign_seg_arrays(pcb_data, layer):
     """Cached per-layer numpy arrays (net_id, x1, y1, x2, y2, half_width) for every
     routed SEGMENT on `layer`, plus every VIA folded in as a degenerate (zero-length)
@@ -461,13 +554,7 @@ def _foreign_seg_arrays(pcb_data, layer):
     # Fold the mutable geometry of the tail in, and a cheap whole-list digest of
     # the fields the arrays are BUILT from, so an in-place edit moves the
     # signature.
-    segs, vias = pcb_data.segments, pcb_data.vias
-    tail = segs[-1] if segs else None
-    vtail = vias[-1] if vias else None
-    sig = (len(segs), len(vias), id(segs), id(vias),
-           (tail.start_x, tail.start_y, tail.end_x, tail.end_y,
-            tail.layer, tail.width, tail.net_id) if tail is not None else None,
-           (vtail.x, vtail.y, vtail.size, vtail.net_id) if vtail is not None else None)
+    sig = _foreign_seg_sig(pcb_data)
     # The whole-list digest below is O(segments) per call. A caller that
     # never edits copper in place and DROPS the cache itself at every
     # splice (smooth_octolinear_chains: `_foreign_seg_arr_cache = None`
@@ -477,9 +564,6 @@ def _foreign_seg_arrays(pcb_data, layer):
     # that was never stale (2026-09-06). The identity of the list, its
     # length and its tail are still checked. Unset (the default), every
     # call pays the #803 digest as before.
-    if not getattr(pcb_data, '_foreign_seg_arr_trust', False):
-        sig = sig + (sum(map(id, segs)), sum(map(id, vias)),
-                     hash(tuple(map(_LAYER_OF, segs))))
     cache = getattr(pcb_data, '_foreign_seg_arr_cache', None)
     if cache is None or cache[0] != sig:
         cache = (sig, {})
@@ -497,13 +581,7 @@ def _foreign_seg_arrays(pcb_data, layer):
         snap = per_layer.get('_all')
         if snap is None:
             segs = pcb_data.segments
-            lay = np.asarray([s.layer for s in segs], dtype=object)
-            s_nid = np.asarray([s.net_id for s in segs], dtype=np.int64)
-            s_ax = np.asarray([s.start_x for s in segs], dtype=float)
-            s_ay = np.asarray([s.start_y for s in segs], dtype=float)
-            s_bx = np.asarray([s.end_x for s in segs], dtype=float)
-            s_by = np.asarray([s.end_y for s in segs], dtype=float)
-            s_hw = np.asarray([(s.width if s.width > 0 else 0.0) / 2.0 for s in segs], dtype=float)
+            lay, s_nid, s_ax, s_ay, s_bx, s_by, s_hw = _seg_rows(segs)
             vias = pcb_data.vias
             v_nid = np.asarray([v.net_id for v in vias], dtype=np.int64)
             v_x = np.asarray([v.x for v in vias], dtype=float)
@@ -530,6 +608,8 @@ def _foreign_seg_arrays(pcb_data, layer):
                         g_lift.append((i, _lift))
             snap = (lay, s_nid, s_ax, s_ay, s_bx, s_by, s_hw, v_nid, v_x, v_y, v_hw, g_lift)
             per_layer['_all'] = snap
+            per_layer['_ids'] = np.fromiter((id(x) for x in segs), dtype=np.int64, count=len(segs))
+            per_layer['_vkey'] = (id(pcb_data.vias), len(pcb_data.vias))
         lay, s_nid, s_ax, s_ay, s_bx, s_by, s_hw, v_nid, v_x, v_y, v_hw, g_lift = snap
         mask = (lay == layer) if lay.size else np.zeros(0, dtype=bool)
         if g_lift:
@@ -614,6 +694,7 @@ def _foreign_seg_bboxes(pcb_data, layer, _validated=False):
 
 
 _NET_EXCESS_CACHE = {}
+_NO_MAP = {}     # the one empty map for None (a fresh {} per call would miss the cache key every time)
 
 
 def _net_excess(fnid, net_clearances, track_clearances, base_clearance):
@@ -621,8 +702,8 @@ def _net_excess(fnid, net_clearances, track_clearances, base_clearance):
     The values are the per-row Python expression, evaluated once per net id and looked up (2026-11-08: the per-row
     list was 5.7 s of cm5io's smoothing pass). The cache holds the two maps it was built from, so a key's ids
     cannot be reused by other maps while the entry lives; a map that grows or shrinks misses the key."""
-    _nc = net_clearances or {}
-    _tc = track_clearances or {}
+    _nc = net_clearances or _NO_MAP
+    _tc = track_clearances or _NO_MAP
     if fnid.size == 0 or int(fnid.min()) < 0:
         return np.array([max(0.0, max(_nc.get(int(f), base_clearance), _tc.get(int(f), 0.0)) - base_clearance)
                          for f in fnid], dtype=float)
@@ -641,6 +722,47 @@ def _net_excess(fnid, net_clearances, track_clearances, base_clearance):
             _NET_EXCESS_CACHE.clear()
         hit = _NET_EXCESS_CACHE[key] = (_nc, _tc, arr)
     return hit[2][fnid]
+
+
+def _net_excess_table(net_clearances, track_clearances, base_clearance):
+    """The per-net excess table _net_excess looks rows up in (index = net id; a net past its end has excess 0, as
+    the per-row expression gives a net in neither map), or None when a map has a non-integer key."""
+    _nc = net_clearances or _NO_MAP
+    _tc = track_clearances or _NO_MAP
+    key = ('table', id(_nc), len(_nc), id(_tc), len(_tc), base_clearance)
+    hit = _NET_EXCESS_CACHE.get(key)
+    if hit is None or hit[0] is not _nc or hit[1] is not _tc:
+        try:
+            keys = [int(k) for k in _nc] + [int(k) for k in _tc]
+        except (TypeError, ValueError):
+            return None
+        if keys and min(keys) < 0:
+            return None
+        size = max(keys, default=-1) + 1
+        arr = np.array([max(0.0, max(_nc.get(f, base_clearance), _tc.get(f, 0.0)) - base_clearance)
+                        for f in range(size)], dtype=float)
+        if len(_NET_EXCESS_CACHE) > 256:
+            _NET_EXCESS_CACHE.clear()
+        hit = _NET_EXCESS_CACHE[key] = (_nc, _tc, arr)
+    return hit[2]
+
+
+try:
+    from grid_router import seg_dist_need as _RUST_SEG_NEED
+except ImportError:          # a grid_router without the kernel: numpy
+    _RUST_SEG_NEED = None
+try:
+    from grid_router import pad_dist_need as _RUST_PAD_NEED
+except ImportError:
+    _RUST_PAD_NEED = None
+if os.environ.get('KRT_RUST_SEG', '1') == '0':
+    _RUST_SEG_NEED = _RUST_PAD_NEED = None
+_RUST_SEG_CHECK = os.environ.get('KRT_RUST_SEG_CHECK', '0') == '1'
+_RUST_SEG_COUNTS = [0]
+if _RUST_SEG_CHECK and _RUST_SEG_NEED is not None:
+    import atexit as _atexit_rs
+    _atexit_rs.register(lambda: print(f"[rust-seg-check] {_RUST_SEG_COUNTS[0]} seg_dist_need calls, every one "
+                                      f"equal to numpy's (decision, and value below need)", flush=True))
 
 
 def _seg_dist_need(x1, y1, x2, y2, sx, sy, ax, ay, bx, by, abx, aby, L2, safe_L2, hw, excess, need):
@@ -720,6 +842,24 @@ def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
     # the arrays were validated just above, with no copper change since: one
     # #803 digest per call, not three (it was most of this function's cost)
     fminx, fmaxx, fminy, fmaxy = _foreign_seg_bboxes(pcb_data, layer, _validated=True)
+    if need is not None and not _SEG_DIST_EXACT and _RUST_SEG_NEED is not None:
+        # the need path in one Rust call (window, lower bounds, sweep; numpy's arithmetic, 2026-11-09)
+        tab = (_net_excess_table(net_clearances, track_clearances, base_clearance)
+               if (net_clearances or track_clearances) else None)
+        if tab is not None or not (net_clearances or track_clearances):
+            ex = _foreign_seg_exempt(pcb_data, layer, net_id, nid.size, _validated=True)
+            r = _RUST_SEG_NEED(float(x1), float(y1), float(x2), float(y2), int(net_id), nid, fax, fay, fbx, fby,
+                               fhw, fminx, fmaxx, fminy, fmaxy, ex if ex.any() else None, tab, float(need), float(R),
+                               int(n))
+            if not _RUST_SEG_CHECK:
+                return r
+            _RUST_SEG_COUNTS[0] += 1
+            ref = _seg_foreign_seg_dist_numpy(pcb_data, net_id, x1, y1, x2, y2, layer, net_clearances,
+                                              base_clearance, track_clearances, need)
+            if (r < need) != (ref < need) or (ref < need and r != ref):
+                raise AssertionError(f'seg_dist_need: rust {r!r} numpy {ref!r} need {need!r} net {net_id} '
+                                     f'({x1},{y1})-({x2},{y2}) {layer}')
+            return r
     near = ((fmaxx >= min(x1, x2) - R) & (fminx <= max(x1, x2) + R) &
             (fmaxy >= min(y1, y2) - R) & (fminy <= max(y1, y2) + R) & (nid != net_id))
     near &= ~_foreign_seg_exempt(pcb_data, layer, net_id, nid.size, _validated=True)
@@ -818,6 +958,29 @@ def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
             dist = dist - excess[None, :]
         best = min(best, float(np.min(dist)))
     return best
+
+
+def _seg_foreign_pad_dist_numpy(pcb_data, net_id, x1, y1, x2, y2, layer, base_clearance, net_clearances, need):
+    """_seg_foreign_pad_dist on numpy only (KRT_RUST_SEG_CHECK's reference)."""
+    global _RUST_PAD_NEED
+    saved, _RUST_PAD_NEED = _RUST_PAD_NEED, None
+    try:
+        return _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer, base_clearance=base_clearance,
+                                     net_clearances=net_clearances, need=need)
+    finally:
+        _RUST_PAD_NEED = saved
+
+
+def _seg_foreign_seg_dist_numpy(pcb_data, net_id, x1, y1, x2, y2, layer, net_clearances, base_clearance,
+                                track_clearances, need):
+    """_seg_foreign_seg_dist on numpy only (KRT_RUST_SEG_CHECK's reference)."""
+    global _RUST_SEG_NEED
+    saved, _RUST_SEG_NEED = _RUST_SEG_NEED, None
+    try:
+        return _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer, net_clearances=net_clearances,
+                                     base_clearance=base_clearance, track_clearances=track_clearances, need=need)
+    finally:
+        _RUST_SEG_NEED = saved
 
 
 def _foreign_via_arrays(pcb_data):

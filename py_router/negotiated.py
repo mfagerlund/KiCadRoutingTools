@@ -574,6 +574,13 @@ def _negotiate_and_commit(state, router, picked, rest, origs, terms_of, taps, ta
     print(f"  negotiation {stats['stopped']} after {stats['passes']} passes, {stats['seconds']:.1f} s, "
           f"{stats['searches']} searches, {stats['expansions']} expansions; routed {stats['routed']}, "
           f"dropped {len(stats['dropped'])}, unroutable {len(stats['unroutable'])}")
+    if stats.get('field_mb'):
+        print(f"  cost-to-go field (KRT_NEGOTIATED_FIELD): built in {stats['field_s']:.1f} s summed over threads, "
+              f"{stats['field_mb']:.1f} MB")
+    if stats.get('par_wall_s'):
+        _pw, _pb, _th = stats['par_wall_s'], stats['par_busy_s'], stats.get('threads', 1)
+        print(f"  parallel rounds: {_pw:.1f} s wall, searches {_pb:.1f} s summed over {_th} threads "
+              f"(utilisation {100.0 * _pb / (_pw * max(1, _th)):.0f}%)")
     names = {nid: name for name, nid in picked}
     index = {nid: i for i, (_, nid) in enumerate(picked)}
     for k, (_n, _nid, ni, _o, label) in enumerate(taps):
@@ -619,23 +626,33 @@ def _negotiate_and_commit(state, router, picked, rest, origs, terms_of, taps, ta
 
     th_cache = {}
     ok = 0
-    for i, (name, nid) in enumerate(picked):
-        paths = router.paths(i)
-        if not paths:
-            rest.append((name, nid))
-            continue
-        if nid not in th_cache:
-            th_cache[nid] = get_same_net_through_hole_positions(pcb_data, nid, config)
-        segs, vias = [], []
-        for p in paths:
-            s, v = path_copper(pcb_data, nid, config, p, origs[i], layer_names, coord, th_cache[nid])
-            segs += s
-            vias += v
-        longest = max(paths, key=len)
-        result = {'net_id': nid, 'new_segments': segs, 'new_vias': vias, 'iterations': 0,
-                  'path_length': sum(len(p) for p in paths), 'path': longest, 'negotiated': True}
-        register_success(state, nid, result)
-        ok += 1
+    # The commit converts paths and registers results; it edits no segment of pcb_data in place, so the
+    # foreign-segment cache that path_copper's via refits read is trusted (no #803 whole-list digest per refit:
+    # 1.9 s of cm5io's route stage, 4.6 s of stmp157's, 2026-11-09). Counts, list identities and tails still key it.
+    _trust_prev = getattr(pcb_data, '_foreign_seg_arr_trust', False)
+    pcb_data._foreign_seg_arr_trust = True
+    pcb_data._foreign_seg_arr_cache = None
+    try:
+        for i, (name, nid) in enumerate(picked):
+            paths = router.paths(i)
+            if not paths:
+                rest.append((name, nid))
+                continue
+            if nid not in th_cache:
+                th_cache[nid] = get_same_net_through_hole_positions(pcb_data, nid, config)
+            segs, vias = [], []
+            for p in paths:
+                s, v = path_copper(pcb_data, nid, config, p, origs[i], layer_names, coord, th_cache[nid])
+                segs += s
+                vias += v
+            longest = max(paths, key=len)
+            result = {'net_id': nid, 'new_segments': segs, 'new_vias': vias, 'iterations': 0,
+                      'path_length': sum(len(p) for p in paths), 'path': longest, 'negotiated': True}
+            register_success(state, nid, result)
+            ok += 1
+    finally:
+        pcb_data._foreign_seg_arr_trust = _trust_prev
+        pcb_data._foreign_seg_arr_cache = None
     if taps:
         n_t, n_v, more = _commit_taps(state, router, taps, coord, layer_names)
         tapped_nets = set(tapped_nets) | more
