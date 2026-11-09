@@ -581,6 +581,15 @@ def _negotiate_and_commit(state, router, picked, rest, origs, terms_of, taps, ta
         _pw, _pb, _th = stats['par_wall_s'], stats['par_busy_s'], stats.get('threads', 1)
         print(f"  parallel rounds: {_pw:.1f} s wall, searches {_pb:.1f} s summed over {_th} threads "
               f"(utilisation {100.0 * _pb / (_pw * max(1, _th)):.0f}%)")
+    if stats.get('counts'):
+        _c = stats['counts']
+        _pops = max(1, _c.get('pops', 0) - _c.get('stale_pops', 0))
+        print(f"  search work: set-up {_c.get('setup_ns', 0) * 1e-9:.1f} s, searches {_c.get('search_ns', 0) * 1e-9:.1f} s "
+              f"summed; per expansion {_c.get('search_ns', 0) / _pops:.0f} ns, "
+              f"{_c.get('pushes', 0) / _pops:.2f} pushes, {_c.get('stale_pops', 0) / _pops:.2f} stale pops, "
+              f"{_c.get('neighbour_tests', 0) / _pops:.2f} neighbour tests, "
+              f"{_c.get('heuristic_targets', 0) / _pops:.2f} heuristic targets, "
+              f"{_c.get('wide_pres_cells', 0) / _pops:.1f} wide-net present-cost cells")
     names = {nid: name for name, nid in picked}
     index = {nid: i for i, (_, nid) in enumerate(picked)}
     for k, (_n, _nid, ni, _o, label) in enumerate(taps):

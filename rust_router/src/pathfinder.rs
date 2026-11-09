@@ -172,6 +172,34 @@ pub struct NegotiatedRouter {
     // the base map, which never changes after construction; empty = ask the base map)
     scode: Vec<u8>,
     vcode: Vec<u8>,
+    cnt: [AtomicU64; 8], // see CNT_NAMES
+}
+
+const CNT_NAMES: [&str; 8] = ["setup_ns", "search_ns", "pops", "stale_pops", "pushes", "neighbour_tests",
+                              "heuristic_targets", "wide_pres_cells"];
+
+/// Per-search counters (Cell: the closures that count are Fn), added to the router's totals when dropped.
+struct Cnt<'a> {
+    c: [std::cell::Cell<u64>; 8],
+    t0: Instant,
+    to: &'a [AtomicU64; 8],
+}
+impl<'a> Cnt<'a> {
+    #[inline]
+    fn add(&self, k: usize, v: u64) {
+        self.c[k].set(self.c[k].get() + v);
+    }
+}
+impl<'a> Drop for Cnt<'a> {
+    fn drop(&mut self) {
+        self.add(1, self.t0.elapsed().as_nanos() as u64);
+        for k in 0..8 {
+            let v = self.c[k].get();
+            if v != 0 {
+                self.to[k].fetch_add(v, AO::Relaxed);
+            }
+        }
+    }
 }
 
 /// One window cell of a search: g, parent, closed stamp (generation * 2 closed, generation * 2 - 1 g valid), the
@@ -444,6 +472,7 @@ impl NegotiatedRouter {
     fn search_net(&self, ni: usize, pres: f32, full: bool, diag: bool)
         -> (Option<Vec<Vec<(i32, i32, u8)>>>, u64, Option<(usize, bool, Vec<(usize, f32, i32, i32, u8)>)>) {
         let net = &self.nets[ni];
+        let cnt = Cnt { c: Default::default(), t0: Instant::now(), to: &self.cnt };
         let win = if full { self.grid_win() } else { self.window(net) };
         let (ww, wh) = (win.w() as usize, win.h() as usize);
         let nl = self.nl;
@@ -574,6 +603,7 @@ impl NegotiatedRouter {
             let k = l as usize * plane + c;
             let mut occ = self.occ_t[k].load(AO::Relaxed);
             if !net.ext.is_empty() {
+                cnt.add(7, net.ext.len() as u64);
                 let (x, y) = (gx0 + (c % gw as usize) as i32, gy0 + (c / gw as usize) as i32);
                 for &(dx, dy) in &net.ext {
                     if let Some(cc) = self.cell(x + dx, y + dy) {
@@ -584,11 +614,13 @@ impl NegotiatedRouter {
             (1.0 + self.hist_t[k]) * (1.0 + pres * occ as f32)
         };
 
+        cnt.add(0, cnt.t0.elapsed().as_nanos() as u64);
         for _round in 1..nt {
             generation += 1;
             // heuristic targets: the terminals not joined yet
             let targets: Vec<(f32, f32, f32)> = (0..nt).filter(|&t| !joined[t]).map(|t| net.centres[t]).collect();
             let hfun = |x: i32, y: i32, l: u8| -> f32 {
+                cnt.add(6, targets.len() as u64);
                 let mut best = f32::INFINITY;
                 for &(cx, cy, r) in &targets {
                     let dx = (x as f32 - cx).abs();
@@ -612,6 +644,7 @@ impl NegotiatedRouter {
                 nd[i].dir = 255;
                 let (x, y, l) = decode(i);
                 heap.push(Open { f: hfun(x, y, l), g: 0.0, idx: i as u32 });
+                cnt.add(4, 1);
             }
             // closed semantics: closed == generation*2 means closed; == generation*2-1 means g valid
             for &i in &tree {
@@ -619,11 +652,14 @@ impl NegotiatedRouter {
             }
             let mut found: Option<usize> = None;
             while let Some(Open { g: gc, idx, .. }) = heap.pop() {
+                cnt.add(2, 1);
                 let i = idx as usize;
                 if nd[i].closed == generation * 2 {
+                    cnt.add(3, 1);
                     continue;
                 }
                 if gc > nd[i].g {
+                    cnt.add(3, 1);
                     continue;
                 }
                 nd[i].closed = generation * 2;
@@ -651,6 +687,7 @@ impl NegotiatedRouter {
                         continue;
                     }
                     let j = lidx(nx, ny, l);
+                    cnt.add(5, 1);
                     let nj = nd[j];
                     if nj.closed == generation * 2 {
                         continue;
@@ -673,6 +710,7 @@ impl NegotiatedRouter {
                         m.dir = di as u8;
                         m.closed = generation * 2 - 1;
                         heap.push(Open { f: ng + hfun(nx, ny, l), g: ng, idx: j as u32 });
+                        cnt.add(4, 1);
                     }
                 }
                 // via: through via to every other layer (not within r_vv of the net's own vias)
@@ -706,6 +744,7 @@ impl NegotiatedRouter {
                                 m.dir = 255;
                                 m.closed = generation * 2 - 1;
                                 heap.push(Open { f: ng + hfun(x, y, l2), g: ng, idx: j as u32 });
+                                cnt.add(4, 1);
                             }
                         }
                     }
@@ -1002,6 +1041,7 @@ impl NegotiatedRouter {
             field_bytes: AtomicU64::new(0),
             scode: Vec::new(),
             vcode: Vec::new(),
+            cnt: Default::default(),
         })
     }
 
@@ -1520,6 +1560,11 @@ impl NegotiatedRouter {
         d.set_item("expansions", total_exp)?;
         d.set_item("field_s", self.field_ns.load(AO::Relaxed) as f64 * 1e-9)?;
         d.set_item("par_busy_s", par_busy)?;
+        let cd = PyDict::new(py);
+        for (k, name) in CNT_NAMES.iter().enumerate() {
+            cd.set_item(*name, self.cnt[k].load(AO::Relaxed))?;
+        }
+        d.set_item("counts", cd)?;
         d.set_item("par_wall_s", par_wall)?;
         d.set_item("threads", pool.current_num_threads())?;
         d.set_item("field_mb", self.field_bytes.load(AO::Relaxed) as f64 / 1048576.0)?;
