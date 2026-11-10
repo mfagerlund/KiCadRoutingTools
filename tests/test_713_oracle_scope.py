@@ -74,6 +74,8 @@ _ALLOWED = {
     '_CLI_VERSION_CACHE': 'the version string a kicad-cli BINARY prints, keyed '
                           'on its path (#1432) -- a fact about the install, '
                           'never about a board',
+    '_GRAPH_MEMO': 'keyed on the identity of the net copper it was built from, '
+                   'which the entry holds, so it cannot answer for other copper',
 }
 _unregistered = sorted(set(_globals) - set(_ALLOWED))
 check("every module-global container is registered with a reason",

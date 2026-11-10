@@ -397,6 +397,25 @@ def kicad_unconnected(board_file: str, kicad_cli: str,
     return links
 
 
+#: {kind: (key, value)}: the last connectivity graph each helper built, keyed on the copper it was built from
+_GRAPH_MEMO = {}
+
+
+def _copper_key(net_id, segs, vias, *more):
+    return (net_id, tuple(map(id, segs)), tuple(map(id, vias)), tuple(id(m) for m in more))
+
+
+def _memo_get(kind, key):
+    hit = _GRAPH_MEMO.get(kind)
+    return hit[1] if hit is not None and hit[0][0] == key else None
+
+
+def _memo_put(kind, key, keep, value):
+    # keep: the objects whose ids are in key, held so none is freed and reused while the entry lives
+    _GRAPH_MEMO[kind] = ((key, keep), value)
+    return value
+
+
 def _net_track_components(pcb_data, net_id):
     """Track+via components of a net, graded with NO zone-fill credit.
     Returns (comp_of_seg: list[root per segment], comp_of_via, segs, vias,
@@ -418,6 +437,11 @@ def _net_track_components(pcb_data, net_id):
     vias = [v for v in pcb_data.vias if v.net_id == net_id]
     if not segs:
         return [None] * len(segs), [None] * len(vias), segs, vias, {}
+    key = _copper_key(net_id, segs, vias)
+    hit = _memo_get('tracks', key)
+    if hit is not None:
+        cs, cv, cl = hit
+        return list(cs), list(cv), segs, vias, defaultdict(float, cl)
     r = check_net_connectivity(net_id, segs, vias, [], [], return_graph=True)
     graph = r.get('graph')
     if not graph:
@@ -436,6 +460,7 @@ def _net_track_components(pcb_data, net_id):
     for i, s in enumerate(segs):
         comp_len[comp_of_seg[i]] += math.hypot(s.end_x - s.start_x,
                                                s.end_y - s.start_y)
+    _memo_put('tracks', key, (segs, vias), (list(comp_of_seg), list(comp_of_via), dict(comp_len)))
     return comp_of_seg, comp_of_via, segs, vias, comp_len
 
 
@@ -1190,19 +1215,24 @@ def _delete_stranded_link_fragment(pcb_data, net_id, pt_a, pt_b):
     # copper to dead metal, the outcome #659 exists to stop.
     if not pads or (not segs and not vias):
         return None
-    r = check_net_connectivity(net_id, segs, vias, pads, zones,
-                               return_graph=True, pcb_data=pcb_data)
-    g = r.get('graph')
-    if not g:
-        return None
-    uf = UnionFind()
-    for a, b in g.get('edges', []):
-        uf.union(a, b)
-    pad_roots = {uf.find(rep)
-                 for rep in (g.get('pad_index_repr') or {}).values()}
-    zone_roots = {uf.find(rep)
-                  for rep in (g.get('zone_index_repr') or {}).values()}
-    via_reprs = g.get('via_index_repr') or {}
+    key = _copper_key(net_id, segs, vias, pads, *zones)
+    hit = _memo_get('stranded', key)
+    if hit is None:
+        r = check_net_connectivity(net_id, segs, vias, pads, zones,
+                                   return_graph=True, pcb_data=pcb_data)
+        g = r.get('graph')
+        if not g:
+            return None
+        uf = UnionFind()
+        for a, b in g.get('edges', []):
+            uf.union(a, b)
+        pad_roots = {uf.find(rep)
+                     for rep in (g.get('pad_index_repr') or {}).values()}
+        zone_roots = {uf.find(rep)
+                      for rep in (g.get('zone_index_repr') or {}).values()}
+        via_reprs = g.get('via_index_repr') or {}
+        hit = _memo_put('stranded', key, (segs, vias, pads, zones), (uf, pad_roots, zone_roots, via_reprs))
+    uf, pad_roots, zone_roots, via_reprs = hit
 
     def _cluster_at(pt):
         px, py = pt
