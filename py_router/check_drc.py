@@ -874,6 +874,47 @@ def _segment_to_polys_distance(x1: float, y1: float, x2: float, y2: float, polys
     return best, best_pt
 
 
+def any_point_within_polys(points, polys, reach: float) -> bool:
+    """Is any point within `reach` (+1e-9) of custom-pad polygon copper (0 inside)?
+
+    The scalar loop's answer: `any(_point_to_polys_distance(x, y, polys) <= reach + 1e-9)`.
+    Above a size the broadcast only NOMINATES points (edge distance within reach + 1e-6, or
+    inside by the same crossing rule), and the scalar decides each nominee. A point the
+    scalar puts inside is either near an edge (nominated by distance) or away from every
+    edge, where the crossing count cannot round differently.
+    """
+    arrays = _polys_edge_arrays(polys)
+    if arrays is None or len(points) * len(arrays[0]) < 4096:
+        return any(_point_to_polys_distance(x, y, polys) <= reach + 1e-9 for (x, y) in points)
+    pts = np.asarray(points, dtype=np.float64)
+    px1, py1, pdx, pdy, plen_sq = arrays
+    lim = reach + 1e-6
+    lim2 = lim * lim
+    rings = []
+    for poly in polys:
+        P = np.asarray(poly, dtype=np.float64)
+        if len(P) >= 2:
+            rings.append((P[:, 0][None, :], P[:, 1][None, :],
+                          np.roll(P[:, 0], 1)[None, :], np.roll(P[:, 1], 1)[None, :]))
+    step = max(1, 2_000_000 // max(1, len(px1)))
+    for s in range(0, len(pts), step):
+        bx = pts[s:s + step, 0][:, None]
+        by = pts[s:s + step, 1][:, None]
+        hit = _pt_edges_d2(bx, by, px1[None, :], py1[None, :], pdx[None, :], pdy[None, :],
+                           plen_sq[None, :]).min(axis=1) <= lim2
+        for xi, yi, xj, yj in rings:
+            cond = (yi > by) != (yj > by)
+            with np.errstate(divide='ignore', invalid='ignore'):
+                xint = (xj - xi) * (by - yi) / (yj - yi) + xi
+                crossing = cond & (bx < xint)
+            hit |= (np.count_nonzero(crossing, axis=1) & 1).astype(bool)
+        for i in np.nonzero(hit)[0]:
+            j = s + int(i)
+            if _point_to_polys_distance(float(pts[j, 0]), float(pts[j, 1]), polys) <= reach + 1e-9:
+                return True
+    return False
+
+
 _GRAPHIC_EFFECTIVE_NETS = None  # set per check run by _build_graphic_unification
 
 
