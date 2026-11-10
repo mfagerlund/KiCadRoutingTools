@@ -163,6 +163,7 @@ REGISTRY = {
         'ABOUT time, which is the one thing a clock may decide.'),
 
     # --- reporting only: elapsed accumulated or printed ---------------------
+    'py_router/cleanup_pipeline.py': ('reporting', 'KRT_CLEANUP_SNAPSHOT records each cleanup call seconds beside its pickle'),
     'py_router/route.py': ('reporting', 'phase timing prints'),
     'py_placer/placement/decap_repair.py': (
         'reporting', "the repair's elapsed seconds in its record (#1382)"),
