@@ -458,7 +458,7 @@ def _pad_overlaps(ap: PasteAperture, pad) -> bool:
     all miss it. A copper-to-opening distance within half a stroke counts as
     overlap for a stroked shape.
     """
-    from check_drc import _pad_perimeter_points, point_to_pad_distance
+    from check_drc import _pad_perimeter_points, any_point_within_polys, point_to_pad_distance
     # A point can be in the opening only inside its bounds, and within `reach`
     # of the pad only inside the pad's bounds grown by it: both are supersets
     # (`_ring_bounds`, `_pad_bounds`), so testing them first changes no
@@ -471,14 +471,27 @@ def _pad_overlaps(ap: PasteAperture, pad) -> bool:
             aperture_distance(pad.global_x, pad.global_y, ap) <= 1e-9:
         return True
     n = max(8, int(max(pad.size_x, pad.size_y) / 0.05) + 1)
-    for (px, py) in _pad_perimeter_points(pad, n):
-        if _in_bounds(px, py, ab) and aperture_distance(px, py, ap) <= 1e-9:
+    perimeter = [(px, py) for (px, py) in _pad_perimeter_points(pad, n)
+                 if _in_bounds(px, py, ab)]
+    # Polygon copper on either side: the broadcast nominates, the scalar decides
+    # (check_drc.any_point_within_polys); the same answer as the loops below.
+    ap_polys = getattr(ap.shape_pad, 'polygons', None) if ap.shape_pad is not None else None
+    if ap_polys:
+        if perimeter and any_point_within_polys(perimeter, ap_polys, 0.0):
             return True
+    else:
+        for (px, py) in perimeter:
+            if aperture_distance(px, py, ap) <= 1e-9:
+                return True
     reach = ap.width / 2.0 if ap.shape_pad is None else 0.0
     pb = _pad_copper_bounds(pad)
-    for (vx, vy) in _boundary_samples(ap):
-        if _in_bounds(vx, vy, pb, reach) and \
-                point_to_pad_distance(vx, vy, pad) <= reach + 1e-9:
+    samples = [(vx, vy) for (vx, vy) in _boundary_samples(ap)
+               if _in_bounds(vx, vy, pb, reach)]
+    pad_polys = getattr(pad, 'polygons', None)
+    if pad_polys:
+        return bool(samples) and bool(any_point_within_polys(samples, pad_polys, reach))
+    for (vx, vy) in samples:
+        if point_to_pad_distance(vx, vy, pad) <= reach + 1e-9:
             return True
     return False
 
