@@ -13,7 +13,8 @@ pad was dropped ("no clear via offset").
 The board is the checked-in HVQFN-32 repro (kicad_files/qfn_diffpair_escape),
 rewritten in a temp dir: the footprint moved to x = 11.106 so the bottom row lands
 at ...356/...856, its routed copper stripped, and four adjacent bottom-row pads
-given their own nets. Needs no pcbnew.
+given their own nets (each with a second pad on a test-point part far off).
+Needs no pcbnew.
 """
 import os
 import re
@@ -42,6 +43,17 @@ def _offgrid_board(path):
     for num in ROW:
         text = re.sub(r'(\(pad "%s" smd roundrect\n)' % num,
                       r'\1\t\t\t(net "ROW%s")\n' % num, text, count=1)
+    # A second pad per row net, on a test-point part far off: the fanout skips a
+    # net with one pad board-wide (nothing to connect to).
+    tp = "".join(
+        '\t\t(pad "%d" smd rect\n\t\t\t(at %.1f 0)\n\t\t\t(size 0.5 0.5)\n'
+        '\t\t\t(layers "F.Cu")\n\t\t\t(net "ROW%s")\n\t\t)\n' % (i + 1, i * 1.0, num)
+        for i, num in enumerate(ROW))
+    text = text.rstrip()
+    assert text.endswith(")")
+    text = (text[:-1] + '\t(footprint "TP_Row"\n\t\t(layer "F.Cu")\n\t\t(at 30 30)\n'
+            '\t\t(property "Reference" "TP1"\n\t\t\t(at 0 -1 0)\n\t\t\t(layer "F.SilkS")\n\t\t)\n'
+            + tp + '\t)\n)\n')
     with open(path, "w", encoding="utf-8") as f:
         f.write(text)
 
