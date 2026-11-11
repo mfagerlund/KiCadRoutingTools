@@ -67,3 +67,9 @@ def test_far_points_are_false_and_inside_points_true():
     assert check_drc.any_point_within_polys(far + [(1.0, 1.0)], [ring], 0.0) is True
     assert check_drc.any_point_within_polys(far + [(1.0, 2.05)], [ring], 0.05) is True
     assert check_drc.any_point_within_polys(far + [(1.0, 2.06)], [ring], 0.05) is False
+
+
+if __name__ == '__main__':
+    test_matches_scalar_on_random_cases()
+    test_far_points_are_false_and_inside_points_true()
+    print('PASS')

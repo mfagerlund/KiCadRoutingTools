@@ -4,8 +4,8 @@
 //! rows, the exact segment-to-segment lower bound per row, and the 0.02 mm sampled sweep over the rows whose bound is
 //! below need + 1e-9. Every float operation is numpy's, in numpy's order (np.linspace's i * (1 / n) samples with the
 //! last set to 1.0, np.clip as min(max(v, 0), 1), np.hypot as hypot), so the value below need is the numpy value
-//! bit for bit; KRT_RUST_SEG_CHECK=1 on the Python side compares the two on every call (2026-11-09: numpy's per-call
-//! overhead was most of cm5io's 48 s smoothing clears()).
+//! bit for bit; tests/test_rust_clearance_kernels.py compares the two (numpy's per-call overhead was most of
+//! cm5io's 48 s smoothing clears()).
 
 use numpy::PyReadonlyArray1;
 use pyo3::prelude::*;

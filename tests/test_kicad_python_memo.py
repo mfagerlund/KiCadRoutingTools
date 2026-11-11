@@ -19,11 +19,6 @@ def test_probe_memo_roundtrip(monkeypatch=None):
             assert not kef._probe_remembered(exe)
             kef._remember_probe(exe)
             assert kef._probe_remembered(exe)
-            os.environ['KRT_KICAD_PYTHON_PROBE'] = 'always'
-            try:
-                assert not kef._probe_remembered(exe)
-            finally:
-                del os.environ['KRT_KICAD_PYTHON_PROBE']
             with open(exe, 'w') as f:   # another build of the interpreter: a miss
                 f.write('xy')
             assert not kef._probe_remembered(exe)

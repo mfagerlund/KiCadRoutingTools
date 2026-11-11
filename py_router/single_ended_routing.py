@@ -197,7 +197,7 @@ def _custom_pad_min_dist(custom, net_id, pts, base_clearance=None,
     polygon edge in one broadcast (the scalar point_to_segment_distance's
     formula, so the value is the walk's), the even-odd inside test the same
     way, so the answer is the per-point walk's minimum without visiting the
-    points one by one (the per-sample loop was 11.6 s of the Revenant route
+    points one by one (the per-sample loop was 11.6 s of a 6-layer board's route
     stage's 35 s smoothing pass under the profiler: 20k calls, 8.4M abs() and
     20k polygon walks for eight custom pads). A single point (the point
     callers) keeps the scalar path: numpy set-up costs more than one walk."""
@@ -469,14 +469,6 @@ def _seg_foreign_pad_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
             r = _RUST_PAD_NEED(float(x1), float(y1), float(x2), float(y2), int(net_id), nids, cx, cy, hx, hy, cr,
                                rc, rs, ex, ey, plc, None if base_clearance is None else float(base_clearance), tab,
                                float(need), float(_FOREIGN_PAD_WINDOW), int(n))
-            if not _RUST_SEG_CHECK:
-                return r
-            _RUST_SEG_COUNTS[0] += 1
-            ref = _seg_foreign_pad_dist_numpy(pcb_data, net_id, x1, y1, x2, y2, layer, base_clearance,
-                                              net_clearances, need, config, own_type)
-            if (r < need) != (ref < need) or (ref < need and r != ref):
-                raise AssertionError(f'pad_dist_need: rust {r!r} numpy {ref!r} need {need!r} net {net_id} '
-                                     f'({x1},{y1})-({x2},{y2}) {layer}')
             return r
     _t = np.linspace(0.0, 1.0, n + 1)
     sx = x1 + (x2 - x1) * _t
@@ -613,14 +605,6 @@ def _seg_rows(segs):
             np.asarray([(s.width if s.width > 0 else 0.0) / 2.0 for s in segs], dtype=float))
 
 
-_SPLICE_CHECK = os.environ.get('KRT_SPLICE_CHECK', '0') == '1'
-_SPLICE_COUNTS = [0, 0]     # patched, dropped (printed at exit under KRT_SPLICE_CHECK)
-if _SPLICE_CHECK:
-    import atexit as _atexit
-    _atexit.register(lambda: print(f"[splice-check] foreign-seg snapshot patched {_SPLICE_COUNTS[0]}, "
-                                   f"dropped {_SPLICE_COUNTS[1]}, every patch equal to a fresh rebuild", flush=True))
-
-
 def _foreign_seg_arrays_splice(pcb_data, removed_ids, added):
     """Call right after `pcb_data.segments = [s for s in old if id(s) not in removed_ids] + added` (vias unchanged):
     patch the cached snapshot to the rows a fresh rebuild would give -- the kept rows in order, then the added -- in
@@ -636,26 +620,16 @@ def _foreign_seg_arrays_splice(pcb_data, removed_ids, added):
     if (snap is None or ids is None or vkey != (id(vias), len(vias)) or snap[11]
             or any(getattr(s, 'graphic', False) for s in added)):
         pcb_data._foreign_seg_arr_cache = None
-        _SPLICE_COUNTS[1] += 1
         return
     rm = np.fromiter(removed_ids, dtype=np.int64, count=len(removed_ids)) if removed_ids else None
     keep = ~np.isin(ids, rm) if rm is not None else np.ones(ids.size, dtype=bool)
     if int(keep.sum()) + len(added) != len(pcb_data.segments):
         pcb_data._foreign_seg_arr_cache = None
-        _SPLICE_COUNTS[1] += 1
         return
     rows = _seg_rows(added)
     new = tuple(np.concatenate((a[keep], b)) for a, b in zip(snap[:7], rows))
     snap2 = new + tuple(snap[7:11]) + ([],)
     ids2 = np.concatenate((ids[keep], np.fromiter((id(s) for s in added), dtype=np.int64, count=len(added))))
-    if _SPLICE_CHECK:
-        fresh = _seg_rows(pcb_data.segments)
-        for k, (a, b) in enumerate(zip(new, fresh)):
-            if a.dtype != b.dtype or a.shape != b.shape or not (a == b).all():
-                raise AssertionError(f'_foreign_seg_arrays_splice: column {k} differs from a fresh rebuild')
-        if not (ids2 == np.asarray([id(x) for x in pcb_data.segments], dtype=np.int64)).all():
-            raise AssertionError('_foreign_seg_arrays_splice: row ids differ from a fresh rebuild')
-    _SPLICE_COUNTS[0] += 1
     pcb_data._foreign_seg_arr_cache = (_foreign_seg_sig(pcb_data),
                                        {'_all': snap2, '_ids': ids2, '_vkey': (id(vias), len(vias))})
 
@@ -701,7 +675,7 @@ def _foreign_seg_arrays(pcb_data, layer):
         # (2026-11-07): the smoothing pass drops the cache at every splice and
         # then asks for the layers of the chain it moved one by one, so each
         # splice paid one full Python pass over the segments PER LAYER (777
-        # rebuilds, 6.4M list appends, 10 s of the Revenant route stage's
+        # rebuilds, 6.4M list appends, 10 s of a 6-layer board's route stage's
         # 35 s smoothing pass). The rows of a layer are its segments in list
         # order, then every via, exactly as before.
         snap = per_layer.get('_all')
@@ -767,7 +741,7 @@ def _cached_own_pad_nets(pcb_data, sig):
     their ids). Routing never adds, removes or moves a footprint's own copper,
     so the lift survives the splices that drop the segment arrays (it was
     keyed on their signature and recomputed after every splice: 2.9 s of the
-    Revenant route stage's smoothing pass, 2026-11-07)."""
+    smoothing pass of a 6-layer board's route stage, 2026-11-07)."""
     hit = getattr(pcb_data, '_gopn_cache', None)
     if hit is not None and hit[0] == sig:
         return hit[1]
@@ -881,14 +855,6 @@ try:
     from grid_router import pad_dist_need as _RUST_PAD_NEED
 except ImportError:
     _RUST_PAD_NEED = None
-if os.environ.get('KRT_RUST_SEG', '1') == '0':
-    _RUST_SEG_NEED = _RUST_PAD_NEED = None
-_RUST_SEG_CHECK = os.environ.get('KRT_RUST_SEG_CHECK', '0') == '1'
-_RUST_SEG_COUNTS = [0]
-if _RUST_SEG_CHECK and _RUST_SEG_NEED is not None:
-    import atexit as _atexit_rs
-    _atexit_rs.register(lambda: print(f"[rust-seg-check] {_RUST_SEG_COUNTS[0]} seg_dist_need calls, every one "
-                                      f"equal to numpy's (decision, and value below need)", flush=True))
 
 
 def _no_scoped(config):
@@ -996,14 +962,6 @@ def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
             r = _RUST_SEG_NEED(float(x1), float(y1), float(x2), float(y2), int(net_id), nid, fax, fay, fbx, fby,
                                fhw, fminx, fmaxx, fminy, fmaxy, ex if ex.any() else None, tab, float(need), float(R),
                                int(n))
-            if not _RUST_SEG_CHECK:
-                return r
-            _RUST_SEG_COUNTS[0] += 1
-            ref = _seg_foreign_seg_dist_numpy(pcb_data, net_id, x1, y1, x2, y2, layer, net_clearances,
-                                              base_clearance, track_clearances, need, config, own_type)
-            if (r < need) != (ref < need) or (ref < need and r != ref):
-                raise AssertionError(f'seg_dist_need: rust {r!r} numpy {ref!r} need {need!r} net {net_id} '
-                                     f'({x1},{y1})-({x2},{y2}) {layer}')
             return r
     near = ((fmaxx >= min(x1, x2) - R) & (fminx <= max(x1, x2) + R) &
             (fmaxy >= min(y1, y2) - R) & (fminy <= max(y1, y2) + R) & (nid != net_id))
@@ -1122,7 +1080,7 @@ def _seg_foreign_seg_dist(pcb_data, net_id, x1, y1, x2, y2, layer,
 
 def _seg_foreign_pad_dist_numpy(pcb_data, net_id, x1, y1, x2, y2, layer, base_clearance, net_clearances, need,
                                 config=None, own_type='track'):
-    """_seg_foreign_pad_dist on numpy only (KRT_RUST_SEG_CHECK's reference)."""
+    """_seg_foreign_pad_dist on numpy only (the Rust kernel's reference, tests/test_rust_clearance_kernels.py)."""
     global _RUST_PAD_NEED
     saved, _RUST_PAD_NEED = _RUST_PAD_NEED, None
     try:
@@ -1134,7 +1092,7 @@ def _seg_foreign_pad_dist_numpy(pcb_data, net_id, x1, y1, x2, y2, layer, base_cl
 
 def _seg_foreign_seg_dist_numpy(pcb_data, net_id, x1, y1, x2, y2, layer, net_clearances, base_clearance,
                                 track_clearances, need, config=None, own_type='track'):
-    """_seg_foreign_seg_dist on numpy only (KRT_RUST_SEG_CHECK's reference)."""
+    """_seg_foreign_seg_dist on numpy only (the Rust kernel's reference, tests/test_rust_clearance_kernels.py)."""
     global _RUST_SEG_NEED
     saved, _RUST_SEG_NEED = _RUST_SEG_NEED, None
     try:

@@ -24,9 +24,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 for _d in ('py_router', 'py_placer', 'py_tools'):
     sys.path.insert(0, os.path.join(ROOT, _d))
 
-# the parse's own scans are counted: the whole-file bytes memo would serve a repeat parse without any
-os.environ['KRT_PARSE_MEMO'] = '0'
 import kicad_parser as K  # noqa: E402
+# the parse's own scans are counted: the whole-file bytes memo would serve a repeat parse without any
+K.parse_kicad_pcb = K.parse_kicad_pcb_uncached
 import kicad_writer  # noqa: E402
 
 BOARD = os.path.join(ROOT, 'kicad_files', 'esp_prog.kicad_pcb')

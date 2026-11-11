@@ -250,10 +250,7 @@ def _probe_file() -> str:
 
 
 def _probe_remembered(cand: str) -> bool:
-    """True when an earlier process's `import pcbnew` probe passed for this exact interpreter file
-    (KRT_KICAD_PYTHON_PROBE=always re-probes)."""
-    if os.environ.get('KRT_KICAD_PYTHON_PROBE') == 'always':
-        return False
+    """True when an earlier process's `import pcbnew` probe passed for this exact interpreter file."""
     key = _probe_key(cand)
     try:
         with open(_probe_file(), encoding='utf-8') as f:

@@ -1326,7 +1326,7 @@ def rescue_candidates(pcb_data, routed_results, single_ended_nets):
 # net name -> digest of the copper around the net when its rescue last failed. A process keeps it across the
 # reconciliation sub-runs and their progress-loop laps (each re-parses the board), so a net whose rescue failed
 # is not re-rescued until copper near it changed: cm5io 2026-11-08 spent 34 + 50 + 47 s re-rescuing the same
-# 12 nets lap after lap, the last lap recovering and improving nothing. KICAD_RESCUE_MEMO=0 turns it off.
+# 12 nets lap after lap, the last lap recovering and improving nothing.
 _RESCUE_MEMO = {}
 
 
@@ -1426,8 +1426,7 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
             # Checker says connected (zone credit etc.) - nothing to rescue,
             # and accounting stays whatever the run already decided.
             continue
-        _memo_on = os.environ.get('KICAD_RESCUE_MEMO', '1') != '0'
-        _digest = _rescue_digest(pcb_data, net_id) if _memo_on else None
+        _digest = _rescue_digest(pcb_data, net_id)
         if _digest is not None:
             # the rules the rescue runs under are part of the key: a lap at another grid, clearance, width, via
             # or layer set (or another fab tier / per-net clearance) is a new attempt
