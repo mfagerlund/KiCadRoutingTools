@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_router'))  # #522
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'py_tools'))  # #522
 
-from route import compute_stale_input_vias, compute_stale_input_segments
+from route import compute_stale_input_vias, compute_stale_input_segments, drop_locked_twins
 from kicad_writer import remove_vias_from_content, remove_segments_from_content
 
 
@@ -165,6 +165,33 @@ def run():
     staleS2 = compute_stale_input_segments({74: [origS2]}, {74}, [reemitS2], [reemitS2])
     check("segment: original stripped when net rerouted to a different span",
           origS2 in staleS2)
+
+    # ---- Locked original: never stripped; the emitted twin leaves the write-list ----
+    # A pre-route locked an 11 um pad-centre-to-grid stub (5.411259, 29.4) ->
+    # (5.4, 29.4); the main route's later edge of the same net left the same pad
+    # by the same stub, and the output kept the unlocked copy in place of the
+    # locked original.
+    crumb = _seg(5.411259, 29.4, 5.4, 29.4, width=0.12, layer='B.Cu', net=15)
+    crumb.locked = True
+    twin = _seg(5.411259, 29.4, 5.4, 29.4, width=0.12, layer='B.Cu', net=15)
+    onward = _seg(5.4, 29.4, 5.0, 29.8, width=0.12, layer='B.Cu', net=15)
+    staleL = compute_stale_input_segments({15: [crumb]}, {15}, [twin, onward], [twin, onward])
+    check("locked: re-emitted twin does not strip the locked original", crumb not in staleL)
+    staleL2 = compute_stale_input_segments({15: [crumb]}, {15}, [onward], [onward], final_ids=set())
+    check("locked: off the final board, still not stripped", crumb not in staleL2)
+    lv = _via(10.0, 10.0, 0.45, 0.2, net=15)
+    lv.locked = True
+    tv = _via(10.0, 10.0, 0.45, 0.2, net=15)
+    other_v = _via(12.0, 10.0, 0.45, 0.2, net=15)
+    swap = [_via(10.0, 10.0, 0.45, 0.2, net=15), _via(13.0, 10.0, 0.45, 0.2, net=15)]
+    res = [dict(new_segments=[twin, onward], new_vias=[tv, other_v])]
+    ns, nv = drop_locked_twins(res, {15: [crumb]}, {15: [lv]}, extra_vias=swap)
+    check("locked twins: one segment and two vias dropped", (ns, nv) == (1, 2))
+    check("locked twins: onward copper kept",
+          res[0]['new_segments'] == [onward] and res[0]['new_vias'] == [other_v] and len(swap) == 1)
+    other_net = [dict(new_segments=[_seg(5.411259, 29.4, 5.4, 29.4, width=0.12, layer='B.Cu', net=16)])]
+    check("locked twins: another net's copper on the locus is kept",
+          drop_locked_twins(other_net, {15: [crumb]}, {}) == (0, 0))
 
     print("=" * 60)
     if fails:
