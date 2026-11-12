@@ -773,6 +773,18 @@ class RoutingDialog(wx.Dialog):
             return defaults.ESCALATION
         return ctrl.GetString(ctrl.GetSelection()) or defaults.ESCALATION
 
+    def _board_hole_clearance(self):
+        """The live board's min_hole_clearance (mm), or None when unreadable
+        (fab_tiers then grades at KiCad's factory value, as the CLI does)."""
+        try:
+            import pcbnew
+            _b = pcbnew.GetBoard()
+            if _b is not None:
+                return _b.GetDesignSettings().m_HoleClearance / 1e6
+        except Exception:
+            pass
+        return None
+
     def _board_floor_dict(self):
         """The live board's Board Setup minimums in fab_tiers FLOOR_KEYS
         vocabulary (only keys declared > 0), for --escalation board."""
@@ -1991,6 +2003,7 @@ class RoutingDialog(wx.Dialog):
                 'fab_overrides_path': self.fab_overrides_path.GetValue().strip(),
                 'escalation': self._escalation_policy(),
                 'board_floors': self._board_floor_dict(),
+                'min_hole_clearance': self._board_hole_clearance(),
                 # #1262: what KiCad grades a Default net at when the DRC
                 # settings writeback is off (fix_drc_settings False).
                 'default_class_clearance': self._default_class_clearance(),
@@ -2122,6 +2135,7 @@ class RoutingDialog(wx.Dialog):
                 'net_clearances_path': self.net_clearances_path.GetValue().strip(),
                 'escalation': self._escalation_policy(),
                 'board_floors': self._board_floor_dict(),
+                'min_hole_clearance': self._board_hole_clearance(),
                 # #1262: what KiCad grades a Default net at when the DRC
                 # settings writeback is off (fix_drc_settings False).
                 'default_class_clearance': self._default_class_clearance(),
@@ -3371,6 +3385,7 @@ class RoutingDialog(wx.Dialog):
             'net_clearances_path': self.net_clearances_path.GetValue().strip(),
             'escalation': self._escalation_policy(),
             'board_floors': self._board_floor_dict(),
+            'min_hole_clearance': self._board_hole_clearance(),
             # #1262: what KiCad grades a Default net at when the DRC
             # settings writeback is off (fix_drc_settings False).
             'default_class_clearance': self._default_class_clearance(),

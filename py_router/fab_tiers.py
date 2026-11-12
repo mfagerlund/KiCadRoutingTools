@@ -736,6 +736,41 @@ def _first_choice_meets(rungs, floors):
     return first + [r for r in rungs if r['via_diameter'] < first[0]['via_diameter'] - 1e-9]
 
 
+#: KiCad's factory min_hole_clearance (mm): what it grades a board at whose .kicad_pro leaves the rule out.
+KICAD_FACTORY_HOLE_CLEARANCE = 0.25
+
+_HOLE_CLEARANCE = None
+
+
+def set_hole_clearance(mm):
+    """The board's copper-to-hole floor (Board Setup min_hole_clearance), or None. Every via rung then keeps it
+    against a neighbour at the rung's clearance: the router keeps foreign copper off a via by copper clearance from
+    its ring, so copper to hole is (via - drill) / 2 + clearance, and a 0.45/0.2 rung at 0.1 mm gives 0.225 mm,
+    under a 0.25 mm floor (scalenode-cm4: 38 of 41 hole_clearance DRC errors were escalated vias)."""
+    global _HOLE_CLEARANCE
+    _HOLE_CLEARANCE = float(mm) if mm else None
+
+
+def get_hole_clearance():
+    return _HOLE_CLEARANCE
+
+
+def _apply_hole_clearance(rungs):
+    """Raise each rung's via diameter to via_drill + 2 * (hole clearance - clearance); collapse duplicates."""
+    if not _HOLE_CLEARANCE:
+        return rungs
+    out = []
+    for r in rungs:
+        rr = dict(r)
+        if rr.get('via_diameter') is not None and rr.get('via_drill') is not None:
+            need = round(rr['via_drill'] + 2 * (_HOLE_CLEARANCE - (rr.get('clearance') or 0.0)), 4)
+            if rr['via_diameter'] < need - 1e-9:
+                rr['via_diameter'] = need
+        if not out or rr != out[-1]:
+            out.append(rr)
+    return out
+
+
 def fab_floor_ladder(copper_layer_count, tier=None, overrides=None):
     """Ordered list of floor dicts for the tier under the active escalation
     policy: the nominal (preferred) floor first, then any escalation rungs
@@ -758,7 +793,7 @@ def fab_floor_ladder(copper_layer_count, tier=None, overrides=None):
     rungs = _tier_rungs(copper_layer_count, tier, overrides)
     if _ESCALATION == 'board':
         rungs = _apply_board_floors(rungs)
-    return rungs
+    return _apply_hole_clearance(rungs)
 
 
 def escalation_rungs(copper_layer_count, tier=None, overrides=None,
@@ -790,7 +825,9 @@ def escalation_rungs(copper_layer_count, tier=None, overrides=None,
     if want and rungs:
         rungs = (_apply_board_floors(rungs, want) if _ESCALATION == 'board'
                  else _first_choice_meets(rungs, want))
-    return rungs
+    # every rung keeps the board's copper-to-hole floor, after the per-net and
+    # rule floors (which may have lowered the ring's clearance)
+    return _apply_hole_clearance(rungs)
 
 
 def fab_floors(copper_layer_count, tier=None, overrides=None):
@@ -1597,6 +1634,19 @@ def set_fab_tier_from_config(config):
         floors = drop_stale_board_floors(declared, requested)
     set_escalation_policy(policy, floors,
                           writeback=bool(config.get('fix_drc_settings', True)))
+    # the board's copper-to-hole floor, as set_policy_from_args installs it for
+    # the CLI: the live design settings hold KiCad's factory value for a board
+    # that leaves the rule out. Always set or reset, so one board's floor never
+    # carries over to the next run in the same process.
+    if policy != 'off':
+        hc = config.get('min_hole_clearance')
+        try:
+            hc = float(hc) if hc is not None else KICAD_FACTORY_HOLE_CLEARANCE
+        except (TypeError, ValueError):
+            hc = KICAD_FACTORY_HOLE_CLEARANCE
+        set_hole_clearance(hc)
+    else:
+        set_hole_clearance(None)
 
 
 def fab_tier_from_args(args):
@@ -1708,6 +1758,17 @@ def set_policy_from_args(args, pcb_path=None):
                        if pcb_path and policy == 'board' and not writeback
                        else None))
     set_escalation_policy(policy, floors, writeback=writeback)
+    # the board's copper-to-hole floor binds every via rung under board and fab
+    # alike (KiCad's DRC grades it whichever policy built the via)
+    if pcb_path and policy != 'off':
+        hc = rules.get('min_hole_clearance')
+        try:
+            hc = float(hc) if hc is not None else KICAD_FACTORY_HOLE_CLEARANCE
+        except (TypeError, ValueError):
+            hc = KICAD_FACTORY_HOLE_CLEARANCE
+        set_hole_clearance(hc)
+    else:
+        set_hole_clearance(None)
     return floors
 
 
