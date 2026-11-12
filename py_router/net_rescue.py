@@ -1326,14 +1326,26 @@ def rescue_candidates(pcb_data, routed_results, single_ended_nets):
 # net name -> digest of the copper around the net when its rescue last failed. A process keeps it across the
 # reconciliation sub-runs and their progress-loop laps (each re-parses the board), so a net whose rescue failed
 # is not re-rescued until copper near it changed: cm5io 2026-11-08 spent 34 + 50 + 47 s re-rescuing the same
-# 12 nets lap after lap, the last lap recovering and improving nothing.
+# 12 nets lap after lap, the last lap recovering and improving nothing. Keyed by (board scope, net name): a net of
+# the same name on another board (a second board routed in the same process) never reuses an entry.
 _RESCUE_MEMO = {}
+
+
+def _board_scope(pcb_data):
+    """Which board a memo entry belongs to: its footprint references and outline. Re-parses of one board (the
+    reconciliation sub-runs) share it; another board in the same process does not."""
+    r = lambda v: round(v, 4)
+    bi = getattr(pcb_data, 'board_info', None)
+    outline = tuple((r(x), r(y)) for x, y in (getattr(bi, 'board_outline', None) or []))
+    return hash((tuple(sorted((getattr(pcb_data, 'footprints', None) or {}).keys())), outline))
 
 
 def _rescue_digest(pcb_data, net_id):
     """Hashable state a rescue of net_id depends on: every pad, segment and via (any net) inside the net's
     bounding box grown by the largest rescue window reach (RESCUE_WINDOW_MARGIN + RESCUE_MIN_WINDOW_HALF), keyed by
-    net NAME (ids are re-assigned per parse), plus each zone's net, layer and outline."""
+    net NAME (ids are re-assigned per parse), plus each zone's net, layer and outline and every keep-out rule area.
+    A pad row carries its full clearance geometry (size, shape, rotation, corner ratio, layers, drill, local
+    clearance), so a resized pad or a changed pad clearance is a new attempt."""
     pads = pcb_data.pads_by_net.get(net_id, [])
     xs = [p.global_x for p in pads]
     ys = [p.global_y for p in pads]
@@ -1362,12 +1374,21 @@ def _rescue_digest(pcb_data, net_id):
                   and max(sg.start_y, sg.end_y) >= y0 and min(sg.start_y, sg.end_y) <= y1)
     vias = sorted((name(v.net_id), r(v.x), r(v.y), r(v.size), r(v.drill), tuple(v.layers))
                   for v in pcb_data.vias if x0 <= v.x <= x1 and y0 <= v.y <= y1)
-    pad_rows = sorted((name(p.net_id), p.component_ref, p.pad_number, r(p.global_x), r(p.global_y))
+    pad_rows = sorted((name(p.net_id), p.component_ref, p.pad_number, r(p.global_x), r(p.global_y),
+                       r(p.size_x), r(p.size_y), p.shape, r(getattr(p, 'rotation', 0.0)),
+                       r(getattr(p, 'rect_rotation', 0.0)), r(getattr(p, 'roundrect_rratio', 0.0)),
+                       tuple(p.layers), r(getattr(p, 'drill', 0.0)), getattr(p, 'pad_type', ''),
+                       r(getattr(p, 'local_clearance', 0.0) or 0.0))
                       for ps in pcb_data.pads_by_net.values() for p in ps
                       if x0 <= p.global_x <= x1 and y0 <= p.global_y <= y1)
     zones = sorted((name(z.net_id), z.layer, tuple((r(x), r(y)) for x, y in z.polygon))
                    for z in getattr(pcb_data, 'zones', None) or [])
-    return hash((tuple(segs), tuple(vias), tuple(pad_rows), tuple(zones)))
+    bi = getattr(pcb_data, 'board_info', None)
+    keepouts = sorted(repr(sorted((k, sorted(v) if isinstance(v, set) else v) for k, v in ko.items()))
+                      for ko in (getattr(bi, 'keepouts', None) or []))
+    keepouts += sorted(repr(vars(g)) if hasattr(g, '__dict__') else repr(g)
+                       for g in (getattr(pcb_data, 'keepout_zones', None) or []))
+    return hash((tuple(segs), tuple(vias), tuple(pad_rows), tuple(zones), tuple(keepouts)))
 
 
 def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
@@ -1441,7 +1462,8 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                             getattr(config, 'hole_clearance', None),
                             tuple(sorted((net_clearances or {}).items())),
                             _pol))
-        if _digest is not None and _RESCUE_MEMO.get(net_name) == _digest:
+        _memo_key = (_board_scope(pcb_data), net_name)
+        if _digest is not None and _RESCUE_MEMO.get(_memo_key) == _digest:
             summary['unchanged'].append(net_name)
             record_net_event(state, net_id, "rescue_failed",
                              {"components": num0, "memo": True, "time_s": 0.0})
@@ -1938,7 +1960,7 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
         elapsed = time.time() - net_start
         if not edge_results and not tap_results:
             if _digest is not None:
-                _RESCUE_MEMO[net_name] = _digest   # a failed rescue adds no copper: the digest still holds
+                _RESCUE_MEMO[_memo_key] = _digest   # a failed rescue adds no copper: the digest still holds
             summary['unchanged'].append(net_name)
             record_net_event(state, net_id, "rescue_failed",
                              {"components": num0, "attempts": attempts,
