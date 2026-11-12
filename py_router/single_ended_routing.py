@@ -800,8 +800,9 @@ _NO_MAP = {}     # the one empty map for None (a fresh {} per call would miss th
 def _net_excess(fnid, net_clearances, track_clearances, base_clearance):
     """Per-row #436/#735 excess max(0, max(nc.get(f, base), tc.get(f, 0)) - base) for the foreign net ids fnid.
     The values are the per-row Python expression, evaluated once per net id and looked up (2026-11-08: the per-row
-    list was 5.7 s of cm5io's smoothing pass). The cache holds the two maps it was built from, so a key's ids
-    cannot be reused by other maps while the entry lives; a map that grows or shrinks misses the key."""
+    list was 5.7 s of cm5io's smoothing pass). An entry holds copies of the two maps it was built from and is
+    used only while both maps still equal them, so a map edited in place (same object, same length, new value)
+    rebuilds the table instead of returning the old one."""
     _nc = net_clearances or _NO_MAP
     _tc = track_clearances or _NO_MAP
     if fnid.size == 0 or int(fnid.min()) < 0:
@@ -810,7 +811,7 @@ def _net_excess(fnid, net_clearances, track_clearances, base_clearance):
     key = (id(_nc), len(_nc), id(_tc), len(_tc), base_clearance)
     hit = _NET_EXCESS_CACHE.get(key)
     top = int(fnid.max())
-    if hit is None or hit[0] is not _nc or hit[1] is not _tc or hit[2].size <= top:
+    if hit is None or hit[0] != _nc or hit[1] != _tc or hit[2].size <= top:
         try:
             size = max(top + 1, max((int(k) for k in _nc), default=0) + 1, max((int(k) for k in _tc), default=0) + 1)
         except (TypeError, ValueError):     # a non-integer key: the per-row expression
@@ -820,18 +821,19 @@ def _net_excess(fnid, net_clearances, track_clearances, base_clearance):
                         for f in range(size)], dtype=float)
         if len(_NET_EXCESS_CACHE) > 256:
             _NET_EXCESS_CACHE.clear()
-        hit = _NET_EXCESS_CACHE[key] = (_nc, _tc, arr)
+        hit = _NET_EXCESS_CACHE[key] = (dict(_nc), dict(_tc), arr)
     return hit[2][fnid]
 
 
 def _net_excess_table(net_clearances, track_clearances, base_clearance):
     """The per-net excess table _net_excess looks rows up in (index = net id; a net past its end has excess 0, as
-    the per-row expression gives a net in neither map), or None when a map has a non-integer key."""
+    the per-row expression gives a net in neither map), or None when a map has a non-integer key. Cached like
+    _net_excess: valid only while both maps equal the copies it was built from."""
     _nc = net_clearances or _NO_MAP
     _tc = track_clearances or _NO_MAP
     key = ('table', id(_nc), len(_nc), id(_tc), len(_tc), base_clearance)
     hit = _NET_EXCESS_CACHE.get(key)
-    if hit is None or hit[0] is not _nc or hit[1] is not _tc:
+    if hit is None or hit[0] != _nc or hit[1] != _tc:
         try:
             keys = [int(k) for k in _nc] + [int(k) for k in _tc]
         except (TypeError, ValueError):
@@ -843,7 +845,7 @@ def _net_excess_table(net_clearances, track_clearances, base_clearance):
                         for f in range(size)], dtype=float)
         if len(_NET_EXCESS_CACHE) > 256:
             _NET_EXCESS_CACHE.clear()
-        hit = _NET_EXCESS_CACHE[key] = (_nc, _tc, arr)
+        hit = _NET_EXCESS_CACHE[key] = (dict(_nc), dict(_tc), arr)
     return hit[2]
 
 
