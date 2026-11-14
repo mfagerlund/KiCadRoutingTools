@@ -166,6 +166,12 @@ def refresh() -> None:
     # removes 95%% of emitters (667 -> 33 pads), the package gate 33%%.
     g['FINE_PITCH_PSEUDO_STUBS'] = _on_default('KICAD_FINE_PITCH_PSEUDO_STUBS')
     g['PSEUDO_STUB_RETIRE'] = _on_default('KICAD_PSEUDO_STUB_RETIRE')
+    # Fine-pitch connectors (board-to-board, FFC, module sockets) are package
+    # 'OTHER', so the gate above leaves their pads with no escape protection
+    # and other nets route across the only exits a 0.4mm row has. Admit any
+    # footprint with >= 10 pads whose nearest pad-centre pitch is <= this many mm; coarse
+    # headers (2.54mm, the #585 item 8 regressions) stay out. 0 = off.
+    g['PSEUDO_STUB_MAX_PITCH'] = _f('KICAD_PSEUDO_STUB_MAX_PITCH', 0.5)
     g['STUB_LAYER_AWARE'] = _opt_in('KICAD_STUB_LAYER_AWARE')
     g['STUB_LAYER_M'] = _f('KICAD_STUB_LAYER_M', 0.0)  # 0 = auto n_layers/2
     # (#585 item 2 -- excluding plane-destined nets' stubs -- was DECIDED

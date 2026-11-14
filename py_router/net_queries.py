@@ -3871,6 +3871,26 @@ def get_all_unrouted_net_ids(pcb_data: PCBData) -> List[int]:
     return list(unrouted_ids)
 
 
+# A pitch-admitted footprint needs a real pad row: small SOT/SC-70 parts at
+# 0.5-0.65mm pitch have every pad on the outline and escape on their own.
+PSEUDO_STUB_PITCH_MIN_PADS = 10
+
+
+def footprint_min_pad_pitch(footprint) -> float:
+    """Smallest centre-to-centre distance between two copper pads of a
+    footprint (mm); inf for fewer than two pads. Pairs closer than 0.2mm are
+    one pad drawn as several (stacked or split copper), not a pitch."""
+    import numpy as _np
+    pts = _np.array([(p.global_x, p.global_y) for p in footprint.pads],
+                    dtype=_np.float64)
+    if len(pts) < 2:
+        return float('inf')
+    d = _np.hypot(pts[:, None, 0] - pts[None, :, 0],
+                  pts[:, None, 1] - pts[None, :, 1])
+    d = d[d > 0.2]
+    return float(d.min()) if d.size else float('inf')
+
+
 def get_chip_pad_positions(pcb_data: PCBData, net_ids: List[int], min_pads: int = 4) -> List[Tuple[float, float, str]]:
     """Pad positions acting as PSEUDO-STUBS for proximity avoidance: pads of
     fine-pitch chip packages (BGA/QFN/QFP) whose net has NOT yet escaped the
@@ -3932,17 +3952,21 @@ def get_chip_pad_positions(pcb_data: PCBData, net_ids: List[int], min_pads: int 
     # orangecrab step, called 1,464x with a full package-detect + segment
     # scan and a 570M-iteration retire genexpr each time).
     _fine_only = env_knobs.FINE_PITCH_PSEUDO_STUBS
+    _max_pitch = env_knobs.PSEUDO_STUB_MAX_PITCH if _fine_only else 0.0
     _refs_memo = getattr(pcb_data, '_chip_refs_memo', None)
     if _refs_memo is None:
         _refs_memo = pcb_data._chip_refs_memo = {}
-    _rk = (min_pads, _fine_only)
+    _rk = (min_pads, _fine_only, _max_pitch)
     chip_refs = _refs_memo.get(_rk)
     if chip_refs is None:
         chip_refs = _refs_memo[_rk] = sorted(
             ref for ref, footprint in pcb_data.footprints.items()
             if footprint.pads and len(footprint.pads) >= min_pads
             and (not _fine_only
-                 or detect_package_type(footprint) in ('BGA', 'QFN', 'QFP')))
+                 or detect_package_type(footprint) in ('BGA', 'QFN', 'QFP')
+                 or (_max_pitch > 0
+                     and len(footprint.pads) >= PSEUDO_STUB_PITCH_MIN_PADS
+                     and footprint_min_pad_pitch(footprint) <= _max_pitch)))
 
     if not chip_refs:
         return []
