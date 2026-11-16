@@ -52,10 +52,20 @@ class RoutedHoleRules:
     class or a name pattern adds nothing of the kind."""
 
     def __init__(self, dr, pcb_data, new_via_type: str = 'through',
-                 new_via_layers: Optional[Sequence[str]] = None):
-        from design_rules import parse_condition_maybe, _eval3, match_dp_suffix, _wx_matches
+                 new_via_layers: Optional[Sequence[str]] = None,
+                 board_floor: float = 0.0):
+        from design_rules import (parse_condition_maybe, _eval3, match_dp_suffix,
+                                  _wx_matches, Rule)
         self.dr = dr
         self.walk = []
+        # The board's own min_hole_clearance is the first rule of KiCad's
+        # vector: no condition, every hole, overridden by any .kicad_dru rule
+        # that matches. `reversed(self.walk)` decides last-first, so it goes in
+        # first. Without it a via's hole was held at the copper clearance only.
+        if board_floor and board_floor > 0:
+            self.walk.append((Rule(name='board min_hole_clearance', order=-1,
+                                   constraints={'hole_clearance': {'min': board_floor}}),
+                              None, float(board_floor)))
         for r in dr.rules:
             spec = r.constraints.get('hole_clearance')
             if spec is None:
@@ -293,7 +303,30 @@ def _routed(config, pcb_data, rules=None):
     span = getattr(config, 'via_span', None) if config is not None else None
     return RoutedHoleRules(rules if rules is not None else config.rules, pcb_data,
                            new_via_type=via_kind(config) if config is not None else 'through',
-                           new_via_layers=list(span) if span else None)
+                           new_via_layers=list(span) if span else None,
+                           board_floor=_board_floor(config, pcb_data))
+
+
+def _board_floor(config, pcb_data) -> float:
+    """The board's copper-to-hole floor a via's hole is held to: the one
+    ``obstacle_map.resolve_hole_clearance`` holds NPTH walls to. 0 when no
+    via binds on it: the copper clearance to a via's ring already keeps
+    copper ``clearance + ring`` off its hole, for the new via size and every
+    via on the board."""
+    if config is None:
+        return 0.0
+    from obstacle_map import resolve_hole_clearance
+    v = resolve_hole_clearance(pcb_data, config)
+    if not v or v <= 0:
+        return 0.0
+    clr = float(getattr(config, 'clearance', 0.0) or 0.0)
+    rings = [(float(s) - float(d)) / 2.0
+             for s, d in [(getattr(config, 'via_size', 0.0), getattr(config, 'via_drill', 0.0))]
+             + [(via.size, via.drill) for via in (getattr(pcb_data, 'vias', None) or ())]
+             if s and d]
+    if not rings or v <= clr + min(rings) + 1e-9:
+        return 0.0
+    return float(v)
 
 
 def install(config, pcb_data) -> None:
@@ -311,6 +344,16 @@ def install(config, pcb_data) -> None:
         return
     if got:
         config.hole_rules = got
+        floor = next((mn for r, _a, mn in got.walk if r.order == -1
+                      and r.name == 'board min_hole_clearance'), None)
+        if floor is not None and floor not in _FLOOR_ANNOUNCED:
+            _FLOOR_ANNOUNCED.add(floor)
+            print(f"Copper-to-hole {floor:g}mm (the board's min_hole_clearance) also held "
+                  f"at via and plated holes: a via's ring plus the copper clearance "
+                  f"falls short of it")
+
+
+_FLOOR_ANNOUNCED = set()
 
 
 def mark_honoured(rules, pcb_data) -> None:
