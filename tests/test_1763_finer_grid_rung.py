@@ -135,3 +135,23 @@ if __name__ == '__main__':
                test_rung_recovers_boxed_in_nets):
         fn()
         print(f'PASS {fn.__name__}')
+
+
+def test_lap_verdict_rejects_a_lap_that_trades_one_net_for_two():
+    """scalenode-cm4's rung lap: SD_DAT1 connected by ripping SD_DAT2, which
+    stayed open, and TRD2_N lost too -- the board is worse, the lap undone."""
+    before = {1: (False, 1, 1), 2: (True, 0, 0), 3: (True, 0, 0)}
+    after = {1: (True, 0, 0), 2: (False, 1, 1), 3: (False, 1, 1)}
+    v, cmp = fgr.lap_verdict(before, after, {1: 'SD_DAT1', 2: 'SD_DAT2',
+                                             3: 'TRD2_N'}.get)
+    assert v == 'reject', cmp
+    assert cmp['gained'] == ['SD_DAT1'] and cmp['lost'] == ['SD_DAT2',
+                                                            'TRD2_N']
+
+
+def test_lap_verdict_keeps_a_gain_and_a_draw():
+    before = {1: (False, 1, 1), 2: (True, 0, 0)}
+    gain = {1: (True, 0, 0), 2: (True, 0, 0)}
+    assert fgr.lap_verdict(before, gain, str)[0] == 'accept'
+    assert fgr.lap_verdict(before, dict(before), str)[0] == 'accept'
+

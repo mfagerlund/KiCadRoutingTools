@@ -7197,6 +7197,29 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 return True
         return False
 
+    def _gui_write_model(rd):
+        """The board the GUI applier will produce from `rd`: input copper
+        MINUS what it removes PLUS what it adds, as ({net: segs}, {net: vias}).
+        NOT pcb_data, which also carries orphan copper from rip/reroute that
+        reaches no apply channel (the same trap the #8 write-model sweep
+        documents)."""
+        _drop_s = {id(s) for s in (rd.get('segments_to_remove') or [])}
+        _drop_v = {id(v) for v in (rd.get('vias_to_remove') or [])}
+        _as = {nid: [s for s in lst if id(s) not in _drop_s]
+               for nid, lst in _orig_seg_by_net.items()}
+        _av = {nid: [v for v in lst if id(v) not in _drop_v]
+               for nid, lst in _orig_via_by_net.items()}
+        for _r6 in rd.get('results', []):
+            for _s6 in (_r6.get('new_segments') or []):
+                _as.setdefault(_s6.net_id, []).append(_s6)
+            for _v6 in (_r6.get('new_vias') or []):
+                _av.setdefault(_v6.net_id, []).append(_v6)
+        for _s6 in (rd.get('all_swap_segments') or []):
+            _as.setdefault(_s6.net_id, []).append(_s6)
+        for _v6 in (rd.get('all_swap_vias') or []):
+            _av.setdefault(_v6.net_id, []).append(_v6)
+        return _as, _av
+
     def locals_rd666():
         try:
             return results_data
@@ -9069,6 +9092,96 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 _rn = _start_rung1763() if _lrfail else False
                 return _rn or None
 
+            def _rung_map1763():
+                """The board as the rung's lap gate grades it: the written
+                file (CLI) or the GUI change-set's write model, per multi-pad
+                net (improvement_gate.net_connectivity_map). Returns
+                (map, board)."""
+                from improvement_gate import net_connectivity_map
+                if return_results:
+                    from plane_fill_model import CopperView
+                    _ws, _wv = _gui_write_model(locals_rd666() or {})
+                    _bd = CopperView(pcb_data,
+                                     [x for _l in _ws.values() for x in _l],
+                                     [x for _l in _wv.values() for x in _l])
+                    return net_connectivity_map(_bd), pcb_data
+                _bd = parse_kicad_pcb(output_file)
+                return net_connectivity_map(_bd), _bd
+
+            def _rung_snapshot1763():
+                """Before a rung lap: the board to put back if the lap
+                leaves it worse (the verified-pour snapshot, both fronts),
+                with its grade. None when no rung lap is next."""
+                if not _rung1763['active']:
+                    return None
+                try:
+                    _sn = _verified_pour_snapshot(
+                        pcb_data, output_file,
+                        locals_rd666() if return_results else None)
+                    _sn['map'], _bd = _rung_map1763()
+                    if not return_results:
+                        _sn['poses'] = _footprint_poses(_bd)
+                    _sn['landed'] = set(getattr(
+                        batch_route, '_forced_link_landed', None) or ())
+                    _sn['swaps'] = len((locals_rd666() or {}).get(
+                        'pad_swaps') or ())
+                    return _sn
+                except Exception as _e1763:
+                    print(f"  (finer-grid rung lap snapshot failed: "
+                          f"{_e1763}) -- the lap is kept unchecked")
+                    return None
+
+            def _rung_lap_rejected1763(_sn):
+                """After a rung lap: put the pre-lap board back when the
+                lap left it worse (improvement_gate.gate_verdict -- more nets
+                broken than connected, or more pads or joins open). The rung
+                rips granted blockers; a victim it cannot re-route stays
+                open, and the rung has no lap after its last to retry it.
+                Returns True when the lap was undone (the rung stops)."""
+                if _sn is None:
+                    return False
+                try:
+                    _amap, _bd = _rung_map1763()
+                    _nm = {i: n.name for i, n in _bd.nets.items()}
+                    _verdict, _cmp = _fgr1763.lap_verdict(
+                        _sn['map'], _amap, lambda i: _nm.get(i, f"Net {i}"))
+                    if _verdict != 'reject':
+                        return False
+                    _moved = _sn['poses'] != _footprint_poses(_bd)
+                    _swapped = len((locals_rd666() or {}).get(
+                        'pad_swaps') or ()) > _sn['swaps']
+                    _what = (f"connected {len(_cmp['gained'])} "
+                             f"({', '.join(_cmp['gained']) or '-'}), broke "
+                             f"{len(_cmp['lost'])} "
+                             f"({', '.join(_cmp['lost']) or '-'}), open pads "
+                             f"{_cmp['disconnected_pads_before']} -> "
+                             f"{_cmp['disconnected_pads_after']}")
+                    if _moved or _swapped:
+                        print(f"  Finer-grid rung (#1763): lap left the board "
+                              f"worse ({_what}) but moved a part or swapped "
+                              f"pads, which a copper restore cannot undo -- "
+                              f"kept")
+                        return False
+                    _verified_pour_restore(
+                        _sn, pcb_data, output_file,
+                        locals_rd666() if return_results else None)
+                    if hasattr(batch_route, '_forced_link_landed'):
+                        batch_route._forced_link_landed = set(_sn['landed'])
+                    print(f"  Finer-grid rung (#1763): lap left the board "
+                          f"worse ({_what}) -- its copper is put back and the "
+                          f"rung stops")
+                    return True
+                except Exception as _e1763:
+                    print(f"  (finer-grid rung lap gate failed: {_e1763}) "
+                          f"-- the lap is kept unchecked")
+                    return False
+                finally:
+                    if _sn.get('file'):
+                        try:
+                            os.remove(_sn['file'])
+                        except OSError:
+                            pass
+
             if return_results:
                 # Bounded PROGRESS-LOOP -- GUI leg (2026-08-06): SAME laps
                 # as the CLI branch below, entirely in-memory (no temp
@@ -9111,6 +9224,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                         print(f"  Reconciliation: snapped {_snapped} in-memory "
                               f"coordinate(s) onto the nm grid (CLI-file parity).")
                     _rk.update(return_results=True, pcb_data=pcb_data)
+                    _sn1763 = _rung_snapshot1763()
                     _lrok, _lrfail, _lrt, _rdata = batch_route(
                         input_file, "", _lap_names, **_rk)
                     _rok += _lrok
@@ -9183,6 +9297,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     # next lap re-parses; here the next lap routes on this
                     # model, so apply them now.
                     _cap_moves_in_run666('reconciliation lap')
+                    # #1763: a rung lap that left the board worse is undone.
+                    if _rung_lap_rejected1763(_sn1763):
+                        break
                     # #572 lap authority, #1554 lap victims and the #1763
                     # finer-grid rung: the same decision as the CLI leg.
                     _lap_names = _next_lap1763(_lrok, _lrfail, _lap10)
@@ -9202,11 +9319,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 _rok = 0
                 _rfail, _rt = 0, 0.0
                 for _lap10 in range(5):
+                    _sn1763 = _rung_snapshot1763()
                     _lrok, _lrfail, _lrt = batch_route(
                         output_file, output_file, _lap_names, **_rk)
                     _rok += _lrok
                     _rfail = _lrfail
                     _rt += _lrt
+                    # #1763: a rung lap that left the board worse is undone.
+                    if _rung_lap_rejected1763(_sn1763):
+                        break
                     # #572: fresh forced-link blocker hints justify a lap
                     # even without recoveries -- lap N failed against a
                     # named pre-existing wall this authority now opens.
@@ -9366,28 +9487,6 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         except Exception as _e10:
             print(f"  post-reconciliation re-audit failed: {_e10}")
 
-    def _gui_write_model(rd):
-        """The board the GUI applier will produce from `rd`: input copper
-        MINUS what it removes PLUS what it adds, as ({net: segs}, {net: vias}).
-        NOT pcb_data, which also carries orphan copper from rip/reroute that
-        reaches no apply channel (the same trap the #8 write-model sweep
-        documents)."""
-        _drop_s = {id(s) for s in (rd.get('segments_to_remove') or [])}
-        _drop_v = {id(v) for v in (rd.get('vias_to_remove') or [])}
-        _as = {nid: [s for s in lst if id(s) not in _drop_s]
-               for nid, lst in _orig_seg_by_net.items()}
-        _av = {nid: [v for v in lst if id(v) not in _drop_v]
-               for nid, lst in _orig_via_by_net.items()}
-        for _r6 in rd.get('results', []):
-            for _s6 in (_r6.get('new_segments') or []):
-                _as.setdefault(_s6.net_id, []).append(_s6)
-            for _v6 in (_r6.get('new_vias') or []):
-                _av.setdefault(_v6.net_id, []).append(_v6)
-        for _s6 in (rd.get('all_swap_segments') or []):
-            _as.setdefault(_s6.net_id, []).append(_s6)
-        for _v6 in (rd.get('all_swap_vias') or []):
-            _av.setdefault(_v6.net_id, []).append(_v6)
-        return _as, _av
 
     # VERIFIED-POUR RE-AUDIT, half 2 (_verified_pour_reaudit): re-audit the
     # pours the finalize verified, weld what the reconciliation cut, refuse the

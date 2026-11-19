@@ -20,6 +20,13 @@ board), so it is bounded by a cell budget instead of a window: a board whose
 half-grid map would exceed FINER_GRID_RUNG_MAX_CELLS (summed over the routing
 layers) skips the rung and says so (#105: halving the grid quadruples the
 cells).
+
+Each rung lap is GATED (lap_verdict): its rips leave a victim open when the
+victim cannot re-route, and the rung has no lap after its last to retry it,
+so a lap that leaves the board worse by the run's own improvement gate (more
+nets broken than connected, or more pads or joins open) is undone and the
+rung stops. scalenode-cm4: a rung lap connected SD_DAT1 by ripping SD_DAT2
+and left SD_DAT2 and TRD2_N open.
 """
 
 import routing_defaults as defaults
@@ -79,3 +86,13 @@ def plan(open_targets: dict, outer_boxed: set, grid_step: float,
             f"over {n_layers} layer(s), past the "
             f"{defaults.FINER_GRID_RUNG_MAX_CELLS / 1e6:.0f}M budget")
     return names, fine, cells, None
+
+
+def lap_verdict(before: dict, after: dict, net_name) -> tuple:
+    """(verdict, comparison) for one rung lap: the run's improvement gate
+    (improvement_gate.compare_connectivity / gate_verdict) between the board
+    before the lap and after it, both {net_id: (connected, pads_off[, joins])}.
+    'reject' = the lap left the board worse on any axis; a draw is kept."""
+    from improvement_gate import compare_connectivity, gate_verdict
+    cmp = compare_connectivity(before, after, net_name)
+    return gate_verdict(cmp), cmp
