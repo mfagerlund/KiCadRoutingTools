@@ -265,6 +265,94 @@ def escape_has_routable_layer(pad, config) -> bool:
     return bool(own & routable) and bool(routable - own)
 
 
+def _stub_shift_neighbour(state, sites, net_id, config, net_clearances):
+    """Neighbour shift for a boxed pad's stub-via escape: no site is clear,
+    but one is blocked only by this run's copper of ONE other single-ended
+    net. Take that net's blocking pieces off the board, lay the stub, and
+    reroute the neighbour whole-net around it (_attempt_net_at_geometry, the
+    rescue's own rung). Kept only when the neighbour grades fully connected
+    again; otherwise every change is undone. Returns the site (its copper
+    NOT left on the board: the escape's guard chain lays it) or None.
+
+    Only copper the run owns is moved: every blocking object must be in the
+    neighbour's result (not an is_existing_route custody entry), the
+    neighbour must be connected now, and diff-pair members are left alone
+    (a single-ended reroute would break the pair)."""
+    from pcb_modification import remove_route_from_pcb_data
+    from stub_via_escape import site_copper
+    pcb_data = state.pcb_data
+    rr = state.routed_results
+    dp = getattr(state, 'diff_pair_by_net_id', None) or {}
+    tried = set()
+    for site in sites:
+        if not site.blockers or site.hard or len(site.blocker_nets) != 1:
+            continue
+        (nb,) = site.blocker_nets
+        if nb == net_id or nb in dp or nb in tried:
+            continue
+        res = rr.get(nb)
+        if res is None or res.get('is_existing_route'):
+            continue
+        own_ids = {id(o) for o in (res.get('new_segments') or [])}
+        own_ids |= {id(o) for o in (res.get('new_vias') or [])}
+        objs = []
+        for b in site.blockers:
+            if b.kind not in ('seg', 'via') or b.obj is None \
+                    or id(b.obj) not in own_ids:
+                objs = None
+                break
+            if all(o is not b.obj for o in objs):
+                objs.append(b.obj)
+        if not objs:
+            continue
+        tried.add(nb)
+        if _net_component_info(pcb_data, nb)[0] > 1:
+            continue        # an open neighbour has nothing to keep whole
+        nb_name = pcb_data.nets[nb].name if nb in pcb_data.nets else str(nb)
+        ripped = {'new_segments': [o for o in objs if hasattr(o, 'start_x')],
+                  'new_vias': [o for o in objs if not hasattr(o, 'start_x')],
+                  'net_id': nb}
+        remove_route_from_pcb_data(pcb_data, ripped)
+        gsegs, gvias = site_copper(site, net_id)
+        stub = {'new_segments': gsegs, 'new_vias': gvias}
+        pcb_data.segments.extend(gsegs)
+        pcb_data.vias.extend(gvias)
+        pcb_data._copper_epoch = getattr(pcb_data, '_copper_epoch', 0) + 1
+        try:
+            edges, fully = _attempt_net_at_geometry(
+                pcb_data, nb, config, net_clearances,
+                scope_key=('stub_shift',))
+        except Exception as e:                                  # noqa: BLE001
+            print(f"    stub-via shift: {nb_name} reroute error ({e})")
+            edges, fully = [], False
+        remove_route_from_pcb_data(pcb_data, stub)
+        if not fully:
+            for r in reversed(edges):
+                remove_route_from_pcb_data(pcb_data, r)
+            pcb_data.segments.extend(ripped['new_segments'])
+            pcb_data.vias.extend(ripped['new_vias'])
+            pcb_data._copper_epoch = getattr(pcb_data, '_copper_epoch', 0) + 1
+            print(f"    stub-via shift: {nb_name} could not reroute around "
+                  f"{site.describe(pcb_data)}; restored")
+            continue
+        # The neighbour's result no longer ships the removed pieces.
+        gone = {id(o) for o in objs}
+        for holder in [res] + list(res.get('leg_results') or []):
+            for key in ('new_segments', 'new_vias'):
+                if isinstance(holder.get(key), list):
+                    holder[key] = [o for o in holder[key] if id(o) not in gone]
+        _commit_whole_net(state, nb_name, nb, edges, 'is_stub_shift')
+        record_net_event(state, nb, "stub_shift_rerouted",
+                         {"for_net": pcb_data.nets[net_id].name
+                          if net_id in pcb_data.nets else str(net_id),
+                          "removed": len(objs), "edges_routed": len(edges)})
+        print(f"    stub-via shift: {nb_name} moved ({len(objs)} piece(s) "
+              f"off, {len(edges)} edge(s) rerouted) for "
+              f"{site.describe(pcb_data)}")
+        return site
+    return None
+
+
 def _withdraw_unused_escapes(pcb_data, net_id, tap_results, config,
                              with_traces=False):
     """The #666 escape vias a net did not use, taken back out.
@@ -1487,6 +1575,7 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                     # #666: the cap move(s) this escape needs, queued only
                     # once the escape SHIPS (below the would-short guard).
                     _capmv666 = []
+                    _stub666 = None
                     if _fp is not None and len(_fp.pads) >= 12:
                         try:
                             from bga_fanout import generate_bga_fanout
@@ -1633,6 +1722,37 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                             layers=v.get('layers', ['F.Cu', 'B.Cu']),
                             net_id=net_id) for v in (_fv or [])
                             if v.get('net_id') == net_id]
+                    if (not _gsegs and not _gvias
+                            and env_knobs.STUB_VIA_ESCAPE):
+                        # Legal-site stub escape: the tap and the fanout
+                        # ladder only try a via AT or one pitch off the pad,
+                        # where a routed connector row leaves no room. Walk
+                        # a pad-layer stub (straight / one dogleg) out to
+                        # the nearest via site that holds every rule
+                        # against the copper already on the board.
+                        from stub_via_escape import (find_stub_via_sites,
+                                                     site_copper)
+                        try:
+                            _sites = find_stub_via_sites(
+                                pcb_data, _pad, net_id, config,
+                                layer=_cu[0] if _cu else None)
+                        except Exception as _se:
+                            print(f"    (stub-via escape error for "
+                                  f"{_pad.component_ref}.{_pad.pad_number}:"
+                                  f" {_se})")
+                            _sites = []
+                        _stub666 = next((st for st in _sites
+                                         if not st.blockers), None)
+                        if (_stub666 is None and _sites
+                                and env_knobs.STUB_VIA_SHIFT):
+                            _stub666 = _stub_shift_neighbour(
+                                state, _sites, net_id, config, net_clearances)
+                        if _stub666 is not None:
+                            _gsegs, _gvias = site_copper(_stub666, net_id)
+                            print(f"    bare-ball escape: "
+                                  f"{_pad.component_ref}.{_pad.pad_number} "
+                                  f"stub-via site: "
+                                  f"{_stub666.describe(pcb_data)}")
                     if not _gsegs and not _gvias:
                         continue
                     # Would-short guard (#468 doctrine, rescue-escape
@@ -1655,7 +1775,18 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                     _lc666, _vc666 = _leg_clear, _via_site_clear
                     _short666 = None
                     with _caps_at_relocation(pcb_data, _capmv666):
-                        for _sg6 in _gsegs:
+                        if _stub666 is not None:
+                            # the stub is graded on the pads' exact copper
+                            # (a circumscribed pad refuses every stub out of
+                            # a 0.4 mm row); re-ask on the live board
+                            from stub_via_escape import leg_blockers
+                            if any(leg_blockers(
+                                    pcb_data, [(_sg6.start_x, _sg6.start_y),
+                                               (_sg6.end_x, _sg6.end_y)],
+                                    _sg6.layer, _sg6.width, net_id, config,
+                                    own_pad=_pad) for _sg6 in _gsegs):
+                                _short666 = 'seg'
+                        for _sg6 in (_gsegs if _stub666 is None else []):
                             if not _lc666(pcb_data,
                                           [(_sg6.start_x, _sg6.start_y),
                                            (_sg6.end_x, _sg6.end_y)],
@@ -1747,7 +1878,10 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                                         'cap_moves': _capmv666})
                     _tapped += 1
                     print(f"    bare-ball escape: {_pad.component_ref}."
-                          f"{_pad.pad_number} fanout-rescue escape "
+                          f"{_pad.pad_number} "
+                          + ("stub-via" if _stub666 is not None
+                             else "fanout-rescue")
+                          + f" escape "
                           f"({len(_gsegs)} seg(s), {len(_gvias)} via(s)) "
                           f"(#666)")
                     continue
