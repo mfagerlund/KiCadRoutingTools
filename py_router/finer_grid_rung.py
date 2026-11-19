@@ -9,7 +9,8 @@ pads (or an earlier step's) walls them in at a grid that never changes.
 This rung is ONE more reconciliation lap, after the ordinary laps, for the nets
 still open whose failure was the static box-in verdict: it re-routes them at
 HALF the run's grid, with rip authority over the blockers the last lap named
-for them. The authority is filtered by the reconciliation's own guard (the
+for them, interleaved across the targets so a capped grant reaches every
+target. The authority is filtered by the reconciliation's own guard (the
 caller passes it in): protected nets are never granted, nets negated by plan
 and plane/zone-backed nets are skipped, and locked copper is dropped by the
 sub-run's own rip filter, exactly as for the #103 escalation.
@@ -41,12 +42,24 @@ def boxed_in_names(open_targets: dict, outer_boxed: set) -> list:
 
 
 def rung_blockers(open_targets: dict, names) -> list:
-    """The blockers the last lap named for `names`, first-seen order."""
+    """The blockers the last lap named for `names`, ROUND-ROBIN across the
+    targets: every target's first blocker, then every target's second, and
+    so on, each name once.
+
+    The caller caps the grant (route.py _RIP_ESCALATION_CAP), so the order
+    decides who gets authority. First-seen order let the first targets spend
+    the whole cap: on scalenode-cm4 the rung's 12 names went to
+    Adapter_USB_P, TRD2_P and ETH_LEDG, and SCL0, SD_DAT1 and SD_DAT0 (the
+    CM4 connector's 0.4 mm row) stayed boxed in by SD_DAT3/SD_DAT2 copper
+    the rung had no right to move. Round-robin gives each target its most
+    decisive blockers before any target gets its tail."""
+    lists = [[b for b in (((open_targets or {}).get(n) or {}).get('blockers')
+                          or []) if b not in names] for n in names]
     out = []
-    for n in names:
-        for b in ((open_targets or {}).get(n) or {}).get('blockers') or []:
-            if b not in out and b not in names:
-                out.append(b)
+    for i in range(max((len(x) for x in lists), default=0)):
+        for x in lists:
+            if i < len(x) and x[i] not in out:
+                out.append(x[i])
     return out
 
 

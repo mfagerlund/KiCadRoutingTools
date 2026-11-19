@@ -43,6 +43,22 @@ def test_plan_selects_boxed_in_only():
     assert fgr.rung_blockers(tlo2, ['A', 'C']) == ['W']
 
 
+def test_rung_blockers_round_robin_across_targets():
+    """A capped grant must reach every target (scalenode-cm4: the first three
+    targets' blockers filled the cap of 12 and SCL0/SD_DAT1/SD_DAT0 got none
+    of theirs, so the rung could not rip the SD_DAT3/SD_DAT2 copper boxing
+    the CM4 row)."""
+    tlo = {'P': {'boxed_in': True, 'blockers': ['a1', 'a2', 'a3', 'a4']},
+           'Q': {'boxed_in': True, 'blockers': ['b1', 'b2', 'b3', 'b4']},
+           'R': {'boxed_in': True, 'blockers': ['b1', 'c2', 'c3']}}
+    got = fgr.rung_blockers(tlo, ['P', 'Q', 'R'])
+    assert got[:4] == ['a1', 'b1', 'a2', 'b2'], got
+    capped = got[:5]
+    assert 'c2' in capped, capped  # R's own decisive blocker is granted
+    assert sorted(got) == sorted({'a1', 'a2', 'a3', 'a4', 'b1', 'b2', 'b3',
+                                  'b4', 'c2', 'c3'}), got
+
+
 def test_plan_nothing_to_do():
     assert fgr.plan({'B': {'boxed_in': False}}, set(), 0.1,
                     (0, 0, 10, 10), 2) == ([], None, 0.0, None)
