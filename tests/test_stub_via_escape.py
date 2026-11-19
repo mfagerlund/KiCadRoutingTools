@@ -269,6 +269,23 @@ def t_shift_classification(tmp):
     check('shift: sites come ranked', ranked == sorted(ranked))
 
 
+def t_open_ids_candidates(tmp):
+    """A pre-existing net rerouted PARTIAL (no pad debt, no restore) is a
+    candidate only when the late pass names it in open_ids; existing copper
+    never is."""
+    from types import SimpleNamespace
+    from net_rescue import rescue_candidates
+    pcb = SimpleNamespace(nets={1: 'A', 2: 'B'},
+                          pads_by_net={1: [0, 1], 2: [0, 1]})
+    results = {1: {'path': []}, 2: {'is_existing_route': True}}
+    nets = [('A', 1), ('B', 2)]
+    check('open_ids: without open_ids a debt-free result is no candidate',
+          rescue_candidates(pcb, results, nets) == [])
+    got = rescue_candidates(pcb, results, nets, open_ids={1, 2})
+    check('open_ids: named debt-free result is partial, existing is not',
+          got == [('A', 1, 'partial')], repr(got))
+
+
 def main():
     try:
         import stub_via_escape  # noqa: F401
@@ -277,7 +294,7 @@ def main():
         return 1
     with tempfile.TemporaryDirectory() as tmp:
         for t in (t_synthetic_boxed_row, t_connector_row_crop,
-                  t_shift_classification):
+                  t_shift_classification, t_open_ids_candidates):
             try:
                 t(tmp)
             except Exception as e:                          # noqa: BLE001

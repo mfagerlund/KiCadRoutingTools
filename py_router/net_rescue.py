@@ -1388,12 +1388,21 @@ def escape_keepout_refusal(pcb_data, segments, vias):
     return gate(segments, vias) if gate else ''
 
 
-def rescue_candidates(pcb_data, routed_results, single_ended_nets):
+def rescue_candidates(pcb_data, routed_results, single_ended_nets,
+                      open_ids=()):
     """The nets rescue_failed_nets attempts, in the order it attempts them,
     as (name, id, kind) rows: kind 'failed' for a net with no result (the
     rescue's copper becomes it), and 'partial' for a result the net has not
     finished (the rescue's copper is folded into it). A casualty's partial
-    restore comes after every other candidate."""
+    restore comes after every other candidate.
+
+    open_ids (the late stub-via pass only): ids whose result neither carries
+    failed_pads_info nor is a restore are taken as 'partial' too -- a
+    pre-existing net the rip loop rerouted PARTIAL has no pad debt yet (the
+    end-of-run sweep attaches it), so without this it was nobody's candidate
+    (scalenode-cm4 SD_DAT3, ripped for SD_DAT0, open at J7.61). The caller's
+    connectivity check still skips a net that is connected."""
+    open_ids = set(open_ids or ())
     candidates = []
     restores = []
     for net_name, net_id in sorted(set(single_ended_nets)):
@@ -1432,11 +1441,14 @@ def rescue_candidates(pcb_data, routed_results, single_ended_nets):
             # had fully reconnected, improved but open. Last, the nets the
             # rescue took before see the board they saw then.
             restores.append((net_name, net_id, 'partial'))
+        elif net_id in open_ids and not result.get('is_existing_route'):
+            candidates.append((net_name, net_id, 'partial'))
     return candidates + restores
 
 
 def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
-                       progress_callback=None, cancel_check=None):
+                       progress_callback=None, cancel_check=None,
+                       stub_via=False, open_ids=()):
     """Scoped fine-parameter rescue for every still-failed/partial net.
 
     Returns a summary dict ({'attempted', 'recovered', 'improved',
@@ -1450,6 +1462,11 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
     copper was visible only by measuring the board (test-board run 5,
     journal [6]). Consumers: route.py exports this dict verbatim under
     summary['rescue'].
+
+    stub_via=True is the LATE pass (route.py, after the terminal
+    escalation): only then may a boxed pad take a legal-site stub-via escape.
+    Laid in the first pass, the stub terrain took corridors the escalation
+    would have routed through (watchy: base 0 open, first-pass stubs 2 open).
 
     progress_callback(i, n, "Rescue: <net>") fires per candidate net (#527 --
     this phase can dominate a step's wall clock and used to sit behind one
@@ -1467,7 +1484,7 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
     routed_results = state.routed_results
 
     candidates = rescue_candidates(pcb_data, routed_results,
-                                   single_ended_nets)
+                                   single_ended_nets, open_ids=open_ids)
     if not candidates:
         return None
 
@@ -1722,7 +1739,7 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                             layers=v.get('layers', ['F.Cu', 'B.Cu']),
                             net_id=net_id) for v in (_fv or [])
                             if v.get('net_id') == net_id]
-                    if (not _gsegs and not _gvias
+                    if (not _gsegs and not _gvias and stub_via
                             and env_knobs.STUB_VIA_ESCAPE):
                         # Legal-site stub escape: the tap and the fanout
                         # ladder only try a via AT or one pitch off the pad,
@@ -1747,6 +1764,13 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                                 and env_knobs.STUB_VIA_SHIFT):
                             _stub666 = _stub_shift_neighbour(
                                 state, _sites, net_id, config, net_clearances)
+                        if _stub666 is None:
+                            print(f"    bare-ball escape: "
+                                  f"{_pad.component_ref}.{_pad.pad_number} "
+                                  f"stub-via: {len(_sites)} site(s), none "
+                                  f"clear" + (f" (best: "
+                                  f"{_sites[0].describe(pcb_data)})"
+                                  if _sites else ""))
                         if _stub666 is not None:
                             _gsegs, _gvias = site_copper(_stub666, net_id)
                             print(f"    bare-ball escape: "

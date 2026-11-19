@@ -5198,6 +5198,28 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             state, _esc_scope, net_clearances=net_clearances,
             progress_callback=progress_callback, cancel_check=cancel_check)
     _lm_mark1801('the terminal escalation')
+    # Legal-site stub-via escape (late rescue): for the nets still failed or
+    # open after the escalation, one more rescue pass whose #666 rung may walk
+    # a boxed pad out to a legal via site. Last, so its stubs never take a
+    # corridor an earlier rung would have used. Inert when nothing is open.
+    if (not (_ckpt_stop or quick)) and env_knobs.STUB_VIA_ESCAPE:
+        # the escalation's scope: the run's nets plus every pre-existing
+        # net it ripped, so a victim rerouted PARTIAL gets the stub too
+        _late_rescue = rescue_failed_nets(
+            state, _esc_scope, net_clearances=net_clearances,
+            progress_callback=progress_callback, cancel_check=cancel_check,
+            stub_via=True,
+            open_ids=set(getattr(pcb_data, '_preexisting_rips', None) or {}))
+        if _late_rescue:
+            if rescue_summary is None:
+                rescue_summary = {'attempted': 0, 'recovered': [],
+                                  'improved': [], 'unchanged': [],
+                                  'pads_reconnected': 0, 'widths': {},
+                                  'time': 0.0}
+            rescue_summary['stub_via_pass'] = {
+                k: _late_rescue.get(k) for k in
+                ('attempted', 'recovered', 'improved', 'unchanged', 'time')}
+        _lm_mark1801('the stub-via rescue')
     if length_match_groups and not _ckpt_stop and _lm_phase1801:
         from routing_common import regrade_late_group_members
         _lm_late = regrade_late_group_members(
