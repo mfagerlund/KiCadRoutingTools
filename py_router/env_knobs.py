@@ -117,6 +117,7 @@ def refresh() -> None:
     g['WALLED_RIP'] = _s('KICAD_WALLED_RIP', '1') != '0'
     g['WALLED_RIP_S'] = _f('KICAD_WALLED_RIP_S', 120.0)
     g['WALLED_RIP_MAX'] = _i('KICAD_WALLED_RIP_MAX', 4)
+    g['WALLED_RIP_CELL_MM'] = _f('KICAD_WALLED_RIP_CELL_MM', 5.0)
     # PR #535's idea as a #189 escalation rung: when the in-pad unblock via
     # fails (or #581 forbids via-in-pad), search this radius (mm) around the
     # boxed pad for the first spot where a through-via is legal on every

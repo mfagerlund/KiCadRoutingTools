@@ -91,7 +91,7 @@ def _stamp_soft(obstacles, pcb_data, cfg, segs, vias):
         by_s.setdefault(x.net_id, []).append(x)
     for x in vias:
         by_v.setdefault(x.net_id, []).append(x)
-    cost = cfg.cell_cost(SOFT_CELL_MM)
+    cost = cfg.cell_cost(env_knobs.WALLED_RIP_CELL_MM)
     rows = []
     for nid in set(by_s) | set(by_v):
         tk, _vk = compute_net_obstacle_cells(
