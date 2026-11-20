@@ -2053,6 +2053,19 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                   f"{len(result.get('new_vias', []))} vias, "
                   f"{result.get('iterations', 0)} iters)")
 
+        if stub_via and num > 1:
+            # The late stub pass is all or nothing: a net it does not close
+            # gets its stubs and gap copper taken back, so the later stages
+            # see the board base gives them. Kept, a partial late rescue
+            # shipped long 0.1 mm gap routes on an open rail (stmp157
+            # 1.2V_HDMI 13 -> 7 parts) the reconciliation lap then routed
+            # around until the route stage hit its memory cap.
+            for _r in tap_results + edge_results:
+                remove_route_from_pcb_data(pcb_data, _r)
+            summary['unchanged'].append(net_name)
+            print(f"    late stub pass: {net_name} not closed ({num0} -> "
+                  f"{num} parts), stubs and gap copper taken back")
+            continue
         if tap_results and num <= 1:
             tap_results = _withdraw_unused_escapes(pcb_data, net_id,
                                                    tap_results, config)
