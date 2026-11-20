@@ -286,7 +286,7 @@ def t_open_ids_candidates(tmp):
           got == [('A', 1, 'partial')], repr(got))
 
 
-def _late_pass(tmp, tag, diff_pair):
+def _late_pass(tmp, tag, diff_pair, extra=''):
     """Run the late pass (stub_via=True) on the 1-pad boxed row with the tap
     rung instrumented; return (summary, tap calls, SIG's new segments)."""
     import contextlib
@@ -295,7 +295,7 @@ def _late_pass(tmp, tag, diff_pair):
     import net_rescue
     path = os.path.join(tmp, f'{tag}.kicad_pcb')
     _row_board(path, pitch=0.5, pad_w=0.3, pad_h=1.0, n=9, straight=1.2,
-               tw=0.25)
+               tw=0.25, extra=extra)
     pcb = _load(path)
     nid, _pad = _sig(pcb)
     calls = []
@@ -311,7 +311,8 @@ def _late_pass(tmp, tag, diff_pair):
     state.remaining_net_ids.append(nid)
     if diff_pair:
         state.diff_pair_by_net_id[nid] = ('SIG', None)
-    before = sum(1 for sg in pcb.segments if sg.net_id == nid)
+    before = (sum(1 for sg in pcb.segments if sg.net_id == nid)
+              + sum(1 for v in pcb.vias if v.net_id == nid))
     plane_pad_tap.tap_pad_with_escalation = spy
     try:
         with contextlib.redirect_stdout(io.StringIO()):
@@ -319,7 +320,8 @@ def _late_pass(tmp, tag, diff_pair):
                 state, [('SIG', nid)], stub_via=True, open_ids={nid})
     finally:
         plane_pad_tap.tap_pad_with_escalation = real
-    after = sum(1 for sg in pcb.segments if sg.net_id == nid)
+    after = (sum(1 for sg in pcb.segments if sg.net_id == nid)
+             + sum(1 for v in pcb.vias if v.net_id == nid))
     return summary, calls, after - before
 
 
@@ -340,6 +342,24 @@ def t_late_pass_stub_rung_only(tmp):
           and not calls, repr(summary))
 
 
+def t_late_pass_all_or_nothing(tmp):
+    """A net the late pass cannot close gets its stub and gap copper taken
+    back (stmp157: a partial 1.2V_HDMI rescue shipped long 0.1 mm gap routes
+    on an open rail; the next lap routed around them until mem_cap)."""
+    # J3 is reachable, J2 is walled off: the pass joins one gap of two
+    # (3 -> 2 parts), which used to ship as 'improved'
+    wall = (_keepout(0, CY + 7, 40, CY + 8)
+            + _fp('J3', CX + 12, CY + 3, [('1', 0, 0, 1, 1, 'SIG')]))
+    summary, calls, added = _late_pass(tmp, 'late_wall', diff_pair=False,
+                                       extra=wall)
+    check('late pass: an unclosable net is attempted, then left unchanged',
+          bool(summary) and summary['attempted'] == 1
+          and summary['unchanged'] == ['SIG'] and not summary['improved'],
+          repr(summary))
+    check('late pass: its stub and gap copper are taken back', added == 0,
+          f'{added} copper item(s) left')
+
+
 def main():
     try:
         import stub_via_escape  # noqa: F401
@@ -349,7 +369,7 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         for t in (t_synthetic_boxed_row, t_connector_row_crop,
                   t_shift_classification, t_open_ids_candidates,
-                  t_late_pass_stub_rung_only):
+                  t_late_pass_stub_rung_only, t_late_pass_all_or_nothing):
             try:
                 t(tmp)
             except Exception as e:                          # noqa: BLE001
