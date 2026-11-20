@@ -444,6 +444,29 @@ def _return_purged_copper(write_lists, purged, keep_segs, keep_vias):
             write_lists[1].append(d)
 
 
+def _pair_partner_on_footprint(nid, pad, pcb_data):
+    """The other leg of net nid's pair when both legs have pads on the tap
+    pad's footprint, else None. KICAD_TAP_PAIR_RIP=0 disables it."""
+    if os.environ.get('KICAD_TAP_PAIR_RIP', '1') == '0':
+        return None
+    from pair_exchange import partner_name
+    net = pcb_data.nets.get(nid)
+    if net is None or not net.name:
+        return None
+    names = {n.name: k for k, n in pcb_data.nets.items() if n.name}
+    pn = partner_name(net.name, names)
+    if pn is None:
+        return None
+    pid = names[pn]
+    ref = getattr(pad, 'component_ref', None)
+    if not ref:
+        return None
+    def _on(k):
+        return any(getattr(q, 'component_ref', None) == ref
+                   for q in pcb_data.pads_by_net.get(k, []))
+    return pid if _on(pid) and _on(nid) else None
+
+
 def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_config,
                         max_search_radius, via_size, via_drill, max_rip_nets,
                         protected_net_ids, first_failure, ripped_net_ids, verbose,
@@ -484,6 +507,39 @@ def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_co
     ripped_local = []  # (net_id, segments, vias) in rip order
     ripped_ids_local = set()
     purged = {}  # net_id -> (segment dicts, via dicts) the rip took off the write lists
+    pair_of = {}  # partner net_id -> the pair leg whose rip pulled it
+
+    def _rip_one(b):
+        """Rip net b off the board, the write lists and the via maps."""
+        if shared_via_maps is not None and \
+                not (corridor_ghosts is not None and corridor_ghosts.mode == 'hard'):
+            # Remove the net's stamps from the shared via maps BEFORE its
+            # copper leaves pcb_data (the stamps are computed from it), then
+            # resync the copper counts after the rip (#263). In #517 arm 2
+            # HARD mode the stamps deliberately STAY (pre-#342 over-block
+            # baseline; note_net_restored below is gated symmetrically so the
+            # refcounts never double-add).
+            shared_via_maps.note_net_ripped(b)
+        rsegs, rvias = _rip_net_from_pcb(pcb_data, b)
+        if write_lists is not None:
+            # A net can already have THIS RUN's copper in the write list (arm
+            # 3's immediate reconnect routes mid-pad-loop; a later pad may rip
+            # that same net again). The rip edits pcb_data only, so without
+            # this purge the output ships the superseded copper on top of
+            # whatever routes through the corridor afterwards (muzy_zynq2:
+            # /G18 reconnected twice -> 99 kicad-DRC). board == write list.
+            _wsegs, _wvias = write_lists
+            purged[b] = ([d for d in _wsegs if d.get('net_id') == b],
+                         [d for d in _wvias if d.get('net_id') == b])
+            _wsegs[:] = [d for d in _wsegs if d.get('net_id') != b]
+            _wvias[:] = [d for d in _wvias if d.get('net_id') != b]
+        if corridor_ghosts is not None:
+            # #517 arm 2: reserve the vacated corridor against other claimants
+            # while this net is off the board.
+            corridor_ghosts.set_net(b, rsegs, rvias)
+        ripped_local.append((b, rsegs, rvias))
+        ripped_ids_local.add(b)
+
     for attempt in range(max_rip_nets):
         blocker = None
         # The frontier blocker names whoever stopped the failed ROUTE; the net
@@ -507,34 +563,19 @@ def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_co
             break
         bname = pcb_data.nets[blocker].name if blocker in pcb_data.nets else f"net_{blocker}"
         print(f"{RED}blocked by {bname} - ripping{RESET}...", end=" ", flush=True)
-        if shared_via_maps is not None and \
-                not (corridor_ghosts is not None and corridor_ghosts.mode == 'hard'):
-            # Remove the blocker's stamps from the shared via maps BEFORE its
-            # copper leaves pcb_data (the stamps are computed from it), then
-            # resync the copper counts after the rip (#263). In #517 arm 2
-            # HARD mode the stamps deliberately STAY (pre-#342 over-block
-            # baseline; note_net_restored below is gated symmetrically so the
-            # refcounts never double-add).
-            shared_via_maps.note_net_ripped(blocker)
-        rsegs, rvias = _rip_net_from_pcb(pcb_data, blocker)
-        if write_lists is not None:
-            # A net can already have THIS RUN's copper in the write list (arm
-            # 3's immediate reconnect routes mid-pad-loop; a later pad may rip
-            # that same net again). The rip edits pcb_data only, so without
-            # this purge the output ships the superseded copper on top of
-            # whatever routes through the corridor afterwards (muzy_zynq2:
-            # /G18 reconnected twice -> 99 kicad-DRC). board == write list.
-            _wsegs, _wvias = write_lists
-            purged[blocker] = ([d for d in _wsegs if d.get('net_id') == blocker],
-                               [d for d in _wvias if d.get('net_id') == blocker])
-            _wsegs[:] = [d for d in _wsegs if d.get('net_id') != blocker]
-            _wvias[:] = [d for d in _wvias if d.get('net_id') != blocker]
-        if corridor_ghosts is not None:
-            # #517 arm 2: reserve the vacated corridor against other claimants
-            # while this net is off the board.
-            corridor_ghosts.set_net(blocker, rsegs, rvias)
-        ripped_local.append((blocker, rsegs, rvias))
-        ripped_ids_local.add(blocker)
+        _rip_one(blocker)
+        # A pair leg ripped off a footprint it shares with its partner
+        # leaves the partner's coupling jog over the tap pad's lane; the
+        # tap then lands in the ripped leg's lane and its reconnect is
+        # boxed by the partner (tiliqua J10.8 GND vs /gpdi/CONN_D0+/-).
+        # Rip the partner too, so both legs reroute around the tap.
+        _pid = _pair_partner_on_footprint(blocker, pad, pcb_data)
+        if _pid is not None and _pid not in ripped_ids_local \
+                and _pid not in protected_net_ids and _pid != net_id:
+            print(f"pair partner {pcb_data.nets[_pid].name} - ripping...",
+                  end=" ", flush=True)
+            _rip_one(_pid)
+            pair_of[_pid] = blocker
         if shared_via_maps is not None:
             shared_via_maps.resync()
             if plane_pad_tap._TAP_MAP_VERIFY:
@@ -564,6 +605,15 @@ def _tap_pad_with_ripup(pad, pad_layer, net_id, pcb_data, tap_config, blocker_co
             new_vias = [result.via] if result.via else []
             clr = result.clearance_used or tap_config.clearance
             for blocker, rsegs, rvias in ripped_local:
+                leg = pair_of.get(blocker)
+                if leg is not None and (
+                        leg in ripped_net_ids
+                        or any(pr[0] == leg for pr in (partial_restores or []))):
+                    # The leg reroutes, so its partner reroutes with it: a
+                    # restored partner would box the leg's reconnect again.
+                    if blocker not in ripped_net_ids:
+                        ripped_net_ids.append(blocker)
+                    continue
                 keep_segs, keep_vias, dropped = [], [], 0
                 for s in rsegs:
                     sd = {'start': (s.start_x, s.start_y),
