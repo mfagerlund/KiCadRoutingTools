@@ -2806,6 +2806,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # read (a GUI process routes many runs).
         from single_ended_routing import _PAD_ENTRY_REFUSALS
         _PAD_ENTRY_REFUSALS.clear()
+        # Cross-lap rip ancestry starts clean per run (laps inherit it).
+        from routing_state import clear_carried_rip_ancestry
+        clear_carried_rip_ancestry()
     # #1630 declare-only: the ohms are RECORDED and nothing else -- every
     # copper decision below runs as without --impedance (the project's own
     # widths), so the target is held aside until the record is written.

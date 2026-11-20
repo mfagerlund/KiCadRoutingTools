@@ -58,7 +58,8 @@ def _sample_path(path: List[Tuple[int, int, int]], step: int = 1) -> List[Tuple[
     sampled.append(path[-1])
     return sampled
 
-from routing_state import RoutingState, record_net_event, record_rip_ancestry, rip_exclude_set
+from routing_state import (RoutingState, record_net_event, record_rip_ancestry, rip_exclude_set,
+                           demote_soft_ancestors, soft_rip_ancestors)
 from bus_detection import detect_bus_groups, get_bus_routing_order, get_attraction_neighbor, bus_attraction_context, BusGroup
 from memory_debug import get_process_memory_mb, estimate_track_proximity_cache_mb
 from obstacle_map import (
@@ -1138,6 +1139,17 @@ def route_single_ended_nets(
                                   f"{', '.join(repr(n) for n in _unrippable_blame)} - not rippable "
                                   f"this run; retry with --rip-existing-nets to authorize")
 
+                    # Cross-lap ancestry (soft): a net that ripped this one in
+                    # an EARLIER reconciliation lap goes to the back of the
+                    # ladder, so the A<->B exchange is not replayed every lap
+                    # while another blocker that would free the net is never
+                    # tried (ftdi USB_D-/USB_D+ vs VBUS).
+                    rippable_blockers, _demoted = demote_soft_ancestors(
+                        state, net_id, rippable_blockers)
+                    if _demoted:
+                        print(f"  Earlier-lap ripper(s) {', '.join(_demoted)} "
+                              f"moved to the back of the rip ladder")
+
                     # Progressive rip-up: try N=1, then N=2, etc up to max_rip_up_count
                     ripped_items = []
                     ripped_canonical_ids = set()  # Track which canonicals have been ripped
@@ -1167,6 +1179,8 @@ def route_single_ended_nets(
                             print_blocking_analysis(fresh_blockers, prefix="    ")
                             # Find the most-blocking net that isn't already ripped
                             next_blocker = None
+                            fresh_blockers, _ = demote_soft_ancestors(
+                                state, net_id, fresh_blockers)
                             for b in fresh_blockers:
                                 if b.net_id in routed_results and not rip_refusal(
                                         pcb_data, b.net_id, "SE rip ladder", diff_pair_by_net_id):
@@ -1186,7 +1200,11 @@ def route_single_ended_nets(
                             # extending to pairs.
                             if (N == 2 and not slot0_guard_used
                                     and len(ripped_items) == 1
-                                    and next_blocker.net_id in routed_results):
+                                    and next_blocker.net_id in routed_results
+                                    # never promote an earlier-lap ripper to
+                                    # a lone rip: that replays the exchange
+                                    and next_blocker.net_id not in
+                                    soft_rip_ancestors(state, net_id)):
                                 _c_next = get_canonical_net_id(next_blocker.net_id, diff_pair_by_net_id)
                                 _c_slot0 = get_canonical_net_id(rippable_blockers[0].net_id, diff_pair_by_net_id)
                                 if _c_next != _c_slot0:

@@ -95,6 +95,11 @@ class RoutingState:
     # in a restore-crossing (cparti +1V8<->B_{n}ON). No clearing needed: a net only
     # re-routes after being ripped, so its ancestry is always freshly set then.
     rip_ancestry: Dict[int, Any] = field(default_factory=dict)
+    # Rip ancestry inherited from EARLIER reconciliation laps of the same run
+    # (seed_carried_rip_ancestry). SOFT: these nets are not excluded from the
+    # blocker analysis, they are ripped LAST -- after every other blocker, and
+    # never alone while another blocker is rippable (soft_rip_ancestors).
+    carried_rip_ancestry: Dict[int, Any] = field(default_factory=dict)
     # #622 victim-priority restore: victims restored WITH AUTHORITY (their
     # channel squatter ripped so the full restore could land) are protected
     # from being ripped again for the rest of the run -- rip_exclude_set
@@ -250,7 +255,7 @@ def create_routing_state(
     This is a convenience factory function that sets up the state with
     all the necessary initial values.
     """
-    return RoutingState(
+    _st = RoutingState(
         pcb_data=pcb_data,
         config=config,
         remaining_net_ids=list(all_net_ids_to_route),
@@ -285,6 +290,8 @@ def create_routing_state(
         cancel_check=cancel_check,
         progress_callback=progress_callback,
     )
+    seed_carried_rip_ancestry(_st)
+    return _st
 
 
 def record_net_event(state: RoutingState, net_id: int, event: str, details: Dict = None):
@@ -322,6 +329,88 @@ def record_rip_ancestry(state: RoutingState, ripper_net_id: int, ripped_net_id: 
     anc = (frozenset({ripper_net_id})
            | state.rip_ancestry.get(ripper_net_id, frozenset())) - {ripped_net_id}
     state.rip_ancestry[ripped_net_id] = anc
+    _carry_rip_ancestry(state, ripped_net_id, anc)
+
+
+# Cross-lap carry of the single-ended rip ancestry. Each final-reconciliation
+# lap is a NESTED batch_route with a fresh RoutingState, so without this the
+# guard reset per lap: lap 1's A rips B, lap 2's B rips A back, and the A<->B
+# exchange repeats every lap while a third blocker that would free B is never
+# tried (ftdi-jtag-programmer USB_D-/USB_D+ vs VBUS). Keyed by net NAME: the
+# sub-runs reload the board. Cleared at the outermost run entry (route.py);
+# seeded into every new state (create_routing_state).
+_CARRIED_RIP_ANCESTRY: Dict[str, frozenset] = {}
+RIP_ANCESTRY_CARRY = os.environ.get(
+    "KICAD_RIP_ANCESTRY_CARRY", "1").strip().lower() not in ("0", "false", "no")
+
+
+def _net_name(state, net_id):
+    nets = getattr(getattr(state, 'pcb_data', None), 'nets', None)
+    if not nets:
+        return None
+    net = nets.get(net_id) if hasattr(nets, 'get') else None
+    return getattr(net, 'name', None) if net is not None else None
+
+
+def _carry_rip_ancestry(state, ripped_net_id, anc):
+    if not RIP_ANCESTRY_CARRY:
+        return
+    ripped = _net_name(state, ripped_net_id)
+    if not ripped:
+        return
+    names = frozenset(n for n in (_net_name(state, a) for a in anc) if n)
+    _CARRIED_RIP_ANCESTRY[ripped] = names
+
+
+def clear_carried_rip_ancestry():
+    _CARRIED_RIP_ANCESTRY.clear()
+
+
+def seed_carried_rip_ancestry(state):
+    """Seed a fresh state's SOFT ancestry (carried_rip_ancestry) from
+    earlier laps of the same run. A hard exclude here measured worse: on
+    ftdi-jtag-programmer lap 2's USB_D+ is boxed by BOTH USB_D- (its lap-1
+    ripper) and VBUS, so it needs N=2 (VBUS, then USB_D-), which a hard
+    exclude forbids."""
+    if not RIP_ANCESTRY_CARRY or not _CARRIED_RIP_ANCESTRY:
+        return
+    nets = getattr(getattr(state, 'pcb_data', None), 'nets', None)
+    if not nets:
+        return
+    by_name = {}
+    for nid, net in nets.items():
+        nm = getattr(net, 'name', None)
+        if nm:
+            by_name[nm] = nid
+    carried = getattr(state, 'carried_rip_ancestry', None)
+    if carried is None:
+        carried = {}
+        state.carried_rip_ancestry = carried
+    for ripped, anc in _CARRIED_RIP_ANCESTRY.items():
+        rid = by_name.get(ripped)
+        if rid is None:
+            continue
+        ids = frozenset(by_name[a] for a in anc if a in by_name) - {rid}
+        if ids:
+            carried[rid] = ids
+
+
+def soft_rip_ancestors(state, net_id) -> Set[int]:
+    """Nets that ripped ``net_id`` in an earlier lap and are not already
+    hard-excluded: the rip ladder tries them last."""
+    carried = getattr(state, 'carried_rip_ancestry', None) or {}
+    return set(carried.get(net_id, ())) - rip_exclude_set(state, net_id)
+
+
+def demote_soft_ancestors(state, net_id, blockers):
+    """Stable-partition ``blockers`` so the soft ancestors come last.
+    Returns (ordered list, names demoted)."""
+    soft = soft_rip_ancestors(state, net_id)
+    if not soft or not blockers:
+        return list(blockers or []), []
+    front = [b for b in blockers if b.net_id not in soft]
+    back = [b for b in blockers if b.net_id in soft]
+    return front + back, [b.net_name for b in back] if front else []
 
 
 def record_pair_rip_ancestry(state: RoutingState, ripper_p_id: int,
