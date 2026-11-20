@@ -274,8 +274,9 @@ def _stub_shift_neighbour(state, sites, net_id, config, net_clearances):
     again; otherwise every change is undone. Returns the site (its copper
     NOT left on the board: the escape's guard chain lays it) or None.
 
-    Only copper the run owns is moved: every blocking object must be in the
-    neighbour's result (not an is_existing_route custody entry), the
+    Only copper the run may move is moved: every blocking object must be in
+    the neighbour's result (an is_existing_route custody entry only when its
+    net is a registered rip candidate of this run), the
     neighbour must be connected now, and diff-pair members are left alone
     (a single-ended reroute would break the pair)."""
     from pcb_modification import remove_route_from_pcb_data
@@ -284,14 +285,33 @@ def _stub_shift_neighbour(state, sites, net_id, config, net_clearances):
     rr = state.routed_results
     dp = getattr(state, 'diff_pair_by_net_id', None) or {}
     tried = set()
+    plane_tries = 0
     for site in sites:
         if not site.blockers or site.hard or len(site.blocker_nets) != 1:
             continue
         (nb,) = site.blocker_nets
-        if nb == net_id or nb in dp or nb in tried:
+        if nb == net_id or nb in dp:
+            continue
+        if env_knobs.STUB_VIA_PLANE_SHIFT and plane_tries < 3 and any(
+                z.net_id == nb for z in (getattr(pcb_data, 'zones', None)
+                                         or ())):
+            # A plane net's tap copper walls the site: re-tap instead.
+            plane_tries += 1
+            if _stub_plane_retap(state, site, nb, net_id, config):
+                return site
+            continue
+        if nb in tried:
             continue
         res = rr.get(nb)
-        if res is None or res.get('is_existing_route'):
+        if res is None:
+            continue
+        # Earlier-step copper moves only when this run may rip its net (a
+        # --rip-existing-nets candidate, registered at run start); it is
+        # then a pre-existing rip like any other, so its removed input
+        # copper is stripped from the output (#220) and the move reported.
+        pre = bool(res.get('is_existing_route'))
+        if pre and nb not in (getattr(state, 'preexisting_registered', None)
+                              or ()):
             continue
         own_ids = {id(o) for o in (res.get('new_segments') or [])}
         own_ids |= {id(o) for o in (res.get('new_vias') or [])}
@@ -342,6 +362,13 @@ def _stub_shift_neighbour(state, sites, net_id, config, net_clearances):
                 if isinstance(holder.get(key), list):
                     holder[key] = [o for o in holder[key] if id(o) not in gone]
         _commit_whole_net(state, nb_name, nb, edges, 'is_stub_shift')
+        if pre:
+            reg = getattr(pcb_data, '_preexisting_rips', None)
+            if reg is None:
+                reg = pcb_data._preexisting_rips = {}
+            reg[nb] = nb_name
+            print(f"      PRE-EXISTING rip: '{nb_name}' (earlier-step copper, "
+                  f"stub-via shift) moved")
         record_net_event(state, nb, "stub_shift_rerouted",
                          {"for_net": pcb_data.nets[net_id].name
                           if net_id in pcb_data.nets else str(net_id),
@@ -351,6 +378,131 @@ def _stub_shift_neighbour(state, sites, net_id, config, net_clearances):
               f"{site.describe(pcb_data)}")
         return site
     return None
+
+
+def _stub_plane_retap(state, site, nb, net_id, config):
+    """Plane-tap shift for a boxed pad's stub-via escape: the site is blocked
+    only by tap copper of plane net `nb` (a pad-to-plane tap an earlier step
+    laid, e.g. a trace from a plane pad to a via it reused). Take the blocking
+    pieces and the copper the cut leaves tied to nothing off the board, lay
+    the stub, and re-tap every plane pad the cut disconnected from the plane
+    with its own tap (tap_pad_with_escalation, the plane repair's tap). Kept
+    only when no pad of `nb` is left off the plane that was on it and the
+    net has no more parts than before; otherwise the board is put back.
+    Returns True when kept (the stub's copper is NOT left on the board: the
+    escape's guard chain lays it).
+
+    The plane net need not be a rip candidate of this run: its routing is
+    the pour, and the invariant checked here (every pad reaches the plane as
+    before) is the one its taps exist for. Removed input copper is stripped
+    from the output through the pre-existing-rip registry (#220)."""
+    from check_connected import net_dead_copper
+    from kicad_parser import is_immutable_copper
+    from pcb_modification import bump_copper_epoch
+    from plane_pad_tap import (find_unconnected_plane_pads,
+                               tap_pad_with_escalation, _tap_copper)
+    from stub_via_escape import site_copper
+    pcb_data = state.pcb_data
+    zones = [z for z in (getattr(pcb_data, 'zones', None) or [])
+             if z.net_id == nb]
+    zl = {z.layer for z in zones}
+    objs = []
+    for b in site.blockers:
+        if b.kind not in ('seg', 'via') or b.obj is None or b.net_id != nb \
+                or getattr(b.obj, 'graphic', False) \
+                or is_immutable_copper(b.obj):
+            return False
+        if all(o is not b.obj for o in objs):
+            objs.append(b.obj)
+    if not objs:
+        return False
+    nb_name = pcb_data.nets[nb].name if nb in pcb_data.nets else str(nb)
+    parts0 = _net_component_info(pcb_data, nb)[0]
+    open0 = {id(p) for p, _l in find_unconnected_plane_pads(pcb_data, nb, zl)}
+    saved_segs, saved_vias = list(pcb_data.segments), list(pcb_data.vias)
+    gone = {id(o) for o in objs}
+    pcb_data.segments = [s for s in pcb_data.segments if id(s) not in gone]
+    pcb_data.vias = [v for v in pcb_data.vias if id(v) not in gone]
+    dsegs, dvias = net_dead_copper(
+        pcb_data, nb, [s for s in pcb_data.segments if s.net_id == nb],
+        [v for v in pcb_data.vias if v.net_id == nb],
+        _on_board_pads(pcb_data, nb), zones)
+    dead = {id(o) for o in list(dsegs) + list(dvias)
+            if not is_immutable_copper(o)}
+    if dead:
+        gone |= dead
+        pcb_data.segments = [s for s in pcb_data.segments
+                             if id(s) not in dead]
+        pcb_data.vias = [v for v in pcb_data.vias if id(v) not in dead]
+    gsegs, gvias = site_copper(site, net_id)
+    stub_ids = {id(o) for o in gsegs + gvias}
+    pcb_data.segments.extend(gsegs)
+    pcb_data.vias.extend(gvias)
+    bump_copper_epoch(pcb_data)
+    new_segs, new_vias = [], []
+    ok, why = True, ''
+    try:
+        for pad, layer in find_unconnected_plane_pads(pcb_data, nb, zl):
+            if id(pad) in open0:
+                continue
+            r = tap_pad_with_escalation(
+                pad, layer, nb, pcb_data, config,
+                max_search_radius=defaults.PLANE_MAX_SEARCH_RADIUS,
+                via_size=config.via_size, via_drill=config.via_drill,
+                fine_for_all=True)
+            if not r.success:
+                ok, why = False, (f"{pad.component_ref}.{pad.pad_number} "
+                                  f"found no tap")
+                break
+            s, v = _tap_copper(nb, r)
+            pcb_data.segments.extend(s)
+            pcb_data.vias.extend(v)
+            bump_copper_epoch(pcb_data)
+            new_segs += s
+            new_vias += v
+    except Exception as e:                                      # noqa: BLE001
+        ok, why = False, f"tap error ({e})"
+    if ok:
+        left = {id(p) for p, _l in
+                find_unconnected_plane_pads(pcb_data, nb, zl)}
+        if not left <= open0 or _net_component_info(pcb_data, nb)[0] > parts0:
+            ok, why = False, "a pad would lose the plane"
+    pcb_data.segments = [s for s in pcb_data.segments if id(s) not in stub_ids]
+    pcb_data.vias = [v for v in pcb_data.vias if id(v) not in stub_ids]
+    if not ok:
+        pcb_data.segments, pcb_data.vias = saved_segs, saved_vias
+        bump_copper_epoch(pcb_data)
+        print(f"    stub-via plane re-tap: {nb_name} for "
+              f"{site.describe(pcb_data)}: {why}; restored")
+        return False
+    bump_copper_epoch(pcb_data)
+    rr = state.routed_results
+    entry = {'net_name': nb_name, 'net_id': nb, 'new_segments': new_segs,
+             'new_vias': new_vias, 'iterations': 0,
+             'is_stub_plane_retap': True}
+    res = rr.get(nb)
+    if res is None:
+        state.results.append(entry)
+        rr[nb] = entry
+    else:
+        for holder in [res] + list(res.get('leg_results') or []):
+            for key in ('new_segments', 'new_vias'):
+                if isinstance(holder.get(key), list):
+                    holder[key] = [o for o in holder[key]
+                                   if id(o) not in gone]
+        _fold_into_result(state, res, entry)
+    reg = getattr(pcb_data, '_preexisting_rips', None)
+    if reg is None:
+        reg = pcb_data._preexisting_rips = {}
+    reg[nb] = nb_name
+    record_net_event(state, nb, "stub_plane_retap",
+                     {"for_net": pcb_data.nets[net_id].name
+                      if net_id in pcb_data.nets else str(net_id),
+                      "removed": len(gone), "tap_vias": len(new_vias)})
+    print(f"    stub-via plane re-tap: {nb_name} ({len(gone)} piece(s) off, "
+          f"{len(new_vias)} tap via(s), {len(new_segs)} seg(s) laid) for "
+          f"{site.describe(pcb_data)}")
+    return True
 
 
 def _withdraw_unused_escapes(pcb_data, net_id, tap_results, config,
@@ -1550,15 +1702,24 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                     continue
                 _px, _py = _pad.global_x, _pad.global_y
                 _reach = max(_pad.size_x, _pad.size_y) / 2.0 + 0.35
+
+                def _near(x, y):
+                    return abs(x - _px) < _reach and abs(y - _py) < _reach
+
+                def _leaves(s):
+                    a = _near(s.start_x, s.start_y)
+                    b = _near(s.end_x, s.end_y)
+                    # the late stub pass also takes a pad whose only own
+                    # copper is a crumb inside its reach (a pad-entry stub
+                    # left by an earlier step): it reaches nothing, so the
+                    # pad is as fenced as a bare one. The main pass keeps
+                    # the strict test.
+                    return (a and not b) or (b and not a) if stub_via \
+                        else (a or b)
                 _bare = not any(
-                    v.net_id == net_id and abs(v.x - _px) < _reach
-                    and abs(v.y - _py) < _reach
+                    v.net_id == net_id and _near(v.x, v.y)
                     for v in pcb_data.vias) and not any(
-                    s.net_id == net_id
-                    and (abs(s.start_x - _px) < _reach
-                         and abs(s.start_y - _py) < _reach
-                         or abs(s.end_x - _px) < _reach
-                         and abs(s.end_y - _py) < _reach)
+                    s.net_id == net_id and _leaves(s)
                     for s in pcb_data.segments)
                 if not _bare:
                     continue

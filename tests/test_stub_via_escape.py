@@ -85,17 +85,22 @@ CX, CY = 20.0, 15.0
 
 
 def _row_board(path, *, pitch, pad_w, pad_h, n, straight, tw, fan=True,
-               extra=''):
+               extra='', sig2=None):
     """J1: a row of n pads, SIG in the middle, every other pad's net routed
     straight down `straight` mm then fanned 45 degrees away; a keep-out
     behind the row (as a connector body's courtyard would)."""
     mid = n // 2
     pads = [(str(i + 1), (i - mid) * pitch, 0, pad_w, pad_h,
-             'SIG' if i == mid else 'N%d' % i) for i in range(n)]
+             'SIG' if i == mid else 'SIG2' if i == sig2 else 'N%d' % i)
+            for i in range(n)]
     parts = [_HEAD, _fp('J1', CX, CY, pads),
              _fp('J2', CX, CY + 10, [('1', 0, 0, 1, 1, 'SIG')], 'B.Cu')]
+    if sig2 is not None:
+        # sig2: a second boxed pad (net SIG2) whose target is J3
+        parts.append(_fp('J3', CX + 6, CY + 10, [('1', 0, 0, 1, 1, 'SIG2')],
+                         'B.Cu'))
     for i in range(n):
-        if i == mid:
+        if i in (mid, sig2):
             continue
         x = CX + (i - mid) * pitch
         sgn = 1 if i > mid else -1
@@ -286,7 +291,7 @@ def t_open_ids_candidates(tmp):
           got == [('A', 1, 'partial')], repr(got))
 
 
-def _late_pass(tmp, tag, diff_pair, extra=''):
+def _late_pass(tmp, tag, diff_pair, extra='', out=None):
     """Run the late pass (stub_via=True) on the 1-pad boxed row with the tap
     rung instrumented; return (summary, tap calls, SIG's new segments)."""
     import contextlib
@@ -315,9 +320,12 @@ def _late_pass(tmp, tag, diff_pair, extra=''):
               + sum(1 for v in pcb.vias if v.net_id == nid))
     plane_pad_tap.tap_pad_with_escalation = spy
     try:
-        with contextlib.redirect_stdout(io.StringIO()):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
             summary = net_rescue.rescue_failed_nets(
                 state, [('SIG', nid)], stub_via=True, open_ids={nid})
+        if out is not None:
+            out.append(buf.getvalue())
     finally:
         plane_pad_tap.tap_pad_with_escalation = real
     after = (sum(1 for sg in pcb.segments if sg.net_id == nid)
@@ -360,6 +368,182 @@ def t_late_pass_all_or_nothing(tmp):
           f'{added} copper item(s) left')
 
 
+def _gnd_plane(x0, y0, x1, y1):
+    return ('\t(zone\n\t\t(net "GND")\n\t\t(layer "B.Cu")\n'
+            '\t\t(name "PLANE")\n\t\t(hatch edge 0.5)\n'
+            '\t\t(connect_pads\n\t\t\t(clearance 0.2)\n\t\t)\n'
+            '\t\t(min_thickness 0.2)\n\t\t(fill yes\n'
+            '\t\t\t(thermal_gap 0.3)\n\t\t\t(thermal_bridge_width 0.3)\n'
+            '\t\t)\n\t\t(polygon\n\t\t\t(pts\n\t\t\t\t(xy %g %g) '
+            '(xy %g %g) (xy %g %g) (xy %g %g)\n\t\t\t)\n\t\t)\n\t)\n'
+            % (x0, y0, x1, y0, x1, y1, x0, y1))
+
+
+def t_late_pass_plane_retap(tmp):
+    """A plane net's tap (pad -> trace -> via) on every stub-via site walls
+    the pad (scalenode J10.42, GND tap ring): the late pass cuts the tap,
+    re-taps the pad elsewhere and escapes; the GND pad stays on the plane.
+    Base: the plane net is no rip candidate, the pad stays boxed."""
+    import contextlib
+    import io
+    import env_knobs
+    import net_rescue
+    from plane_pad_tap import find_unconnected_plane_pads
+    from stub_via_escape import find_stub_via_sites
+    from routing_state import RoutingState
+    # a GND tap via on every clear stub-via site, repeated until no clear
+    # site is left, all joined by one trace to a GND pad right of the row
+    # (a tap ring, as on scalenode)
+    pts = set()
+    extra = ''
+    for _round in range(6):
+        pre = os.path.join(tmp, 'plane-pre.kicad_pcb')
+        _row_board(pre, pitch=0.5, pad_w=0.3, pad_h=1.0, n=9, straight=1.2,
+                   tw=0.25, extra=extra)
+        pcb0 = _load(pre)
+        nid0, pad0 = _sig(pcb0)
+        clear = [s for s in find_stub_via_sites(pcb0, pad0, nid0, _cfg(),
+                                                layer='F.Cu')
+                 if not s.blockers]
+        if not clear:
+            break
+        pts |= {(round(s.via_xy[0], 3), round(s.via_xy[1], 3))
+                for s in clear}
+        chain = sorted(pts)
+        gx, gy = CX + 5.0, max(y for _, y in chain)
+        extra = _gnd_plane(1, 1, 39, 29)
+        extra += _fp('J4', gx, gy, [('1', 0, 0, 0.6, 0.6, 'GND')])
+        for (x, y) in chain:
+            extra += _via(x, y, 0.6, 0.3, 'GND')
+        chain = chain + [(gx, gy)]
+        for (a, b) in zip(chain, chain[1:]):
+            extra += _seg(a[0], a[1], b[0], b[1], 0.2, 'GND')
+    check('plane re-tap: the tap ring walls every stub-via site',
+          bool(pts) and not clear, f'{len(pts)} via(s)')
+
+    def run(knob):
+        path = os.path.join(tmp, f'plane-{int(knob)}.kicad_pcb')
+        _row_board(path, pitch=0.5, pad_w=0.3, pad_h=1.0, n=9, straight=1.2,
+                   tw=0.25, extra=extra)
+        pcb = _load(path)
+        nid, _pad = _sig(pcb)
+        gnd = next(n for n, net in pcb.nets.items() if net.name == 'GND')
+        state = RoutingState(pcb_data=pcb, config=_cfg())
+        state.working_obstacles = None
+        state.routed_results[nid] = {'path': []}
+        state.remaining_net_ids.append(nid)
+        old = env_knobs.STUB_VIA_PLANE_SHIFT
+        env_knobs.STUB_VIA_PLANE_SHIFT = knob
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                summary = net_rescue.rescue_failed_nets(
+                    state, [('SIG', nid)], stub_via=True, open_ids={nid})
+        finally:
+            env_knobs.STUB_VIA_PLANE_SHIFT = old
+        with contextlib.redirect_stdout(io.StringIO()):
+            off = find_unconnected_plane_pads(pcb, gnd, {'B.Cu'})
+        return summary, pcb, gnd, off
+
+    summary, pcb, gnd, off = run(False)
+    check('plane re-tap off: the walled pad is not rescued (base)',
+          not summary or not summary.get('recovered'), repr(summary))
+    summary, pcb, gnd, off = run(True)
+    check('plane re-tap: the walled pad is rescued',
+          bool(summary) and 'SIG' in (summary.get('recovered') or []),
+          repr(summary))
+    check('plane re-tap: the GND pad is still on the plane', not off,
+          repr([(p.component_ref, p.pad_number) for p, _ in off]))
+    check('plane re-tap: GND keeps tap vias',
+          any(v.net_id == gnd for v in pcb.vias))
+    check('plane re-tap: the plane net is registered for the stale strip',
+          gnd in (getattr(pcb, '_preexisting_rips', None) or {}))
+
+
+def t_late_pass_crumb_pad(tmp):
+    """The late pass takes a pad whose only own copper is a crumb inside its
+    reach (scalenode J7.80: a pad-entry stub an earlier step left, reaching
+    nothing). The pad is as fenced as a bare one; base skipped it as
+    'has copper' and the net stayed open."""
+    crumb = _seg(CX, CY, CX, CY + 0.3, 0.1, 'SIG')
+    log = []
+    summary, _calls, added = _late_pass(tmp, 'late_crumb', diff_pair=False,
+                                        extra=crumb, out=log)
+    check('crumb pad: the late pass attempts it and closes the net',
+          bool(summary) and summary['attempted'] == 1
+          and summary['recovered'] == ['SIG'], repr(summary))
+    check('crumb pad: the late pass takes the boxed J1 pad itself',
+          'J1.5 stub-via site' in ''.join(log),
+          f'{added} new copper item(s)')
+
+
+def t_shift_preexisting_registered(tmp):
+    """The stub-via shift may move earlier-step copper (is_existing_route)
+    only when its net is a registered rip candidate of this run
+    (--rip-existing-nets); the move is then a pre-existing rip, reported for
+    the output strip (#220). Base never moved earlier-step copper, so a pad
+    fenced by a rip candidate's input copper stayed boxed (scalenode J7.82,
+    SD_DAT3)."""
+    import contextlib
+    import io
+    import net_rescue
+    from routing_state import RoutingState
+    from stub_via_escape import find_stub_via_sites
+    pre = os.path.join(tmp, 'shift-pre-reg0.kicad_pcb')
+    _row_board(pre, pitch=0.5, pad_w=0.3, pad_h=1.0, n=9, straight=1.2,
+               tw=0.25)
+    pcb0 = _load(pre)
+    nid0, pad0 = _sig(pcb0)
+    clear0 = [st for st in find_stub_via_sites(pcb0, pad0, nid0, _cfg(),
+                                               layer='F.Cu') if not st.blockers]
+    if not clear0:
+        check('shift pre: the base board has a clear site to occupy', False)
+        return
+    vx, vy = clear0[0].via_xy
+    path = os.path.join(tmp, 'shift-pre-reg.kicad_pcb')
+    _row_board(path, pitch=0.5, pad_w=0.3, pad_h=1.0, n=9, straight=1.2,
+               tw=0.25, extra=_via(vx, vy, 0.6, 0.3, 'N5'))
+
+    def run(registered):
+        pcb = _load(path)
+        nid, pad = _sig(pcb)
+        n5 = next(n for n, net in pcb.nets.items() if net.name == 'N5')
+        sites = [st for st in find_stub_via_sites(pcb, pad, nid, _cfg(),
+                                                  layer='F.Cu')
+                 if st.blocker_nets == frozenset({n5}) and not st.hard]
+        before = net_rescue._net_component_info(pcb, n5)[0]
+        state = RoutingState(pcb_data=pcb, config=_cfg())
+        state.working_obstacles = None
+        res = {'net_name': 'N5', 'net_id': n5, 'is_existing_route': True,
+               'new_segments': [sg for sg in pcb.segments if sg.net_id == n5],
+               'new_vias': [v for v in pcb.vias if v.net_id == n5]}
+        state.results.append(res)
+        state.routed_results[n5] = res
+        state.preexisting_registered = {n5} if registered else set()
+        got = None
+        if sites:
+            with contextlib.redirect_stdout(io.StringIO()):
+                got = net_rescue._stub_shift_neighbour(state, sites, nid,
+                                                       _cfg(), None)
+        after = net_rescue._net_component_info(pcb, n5)[0]
+        at = any(abs(v.x - vx) < 1e-6 and abs(v.y - vy) < 1e-6
+                 for v in pcb.vias if v.net_id == n5)
+        rips = getattr(pcb, '_preexisting_rips', None) or {}
+        return sites, got, before, after, at, n5 in rips
+
+    sites, got, before, after, at, ripped = run(False)
+    check('shift pre: a site walled only by N5 exists', bool(sites),
+          f'{len(sites)} site(s)')
+    check('shift pre: unregistered earlier-step copper is not moved',
+          got is None and at and not ripped,
+          f'got={got is not None} at={at} ripped={ripped}')
+    sites, got, before, after, at, ripped = run(True)
+    check('shift pre: a registered rip candidate is moved off the site',
+          got is not None and not at, f'got={got is not None} at={at}')
+    check('shift pre: the move keeps N5 whole and is a reported rip',
+          after <= before and ripped,
+          f'parts {before}->{after} ripped={ripped}')
+
+
 def main():
     try:
         import stub_via_escape  # noqa: F401
@@ -369,7 +553,8 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         for t in (t_synthetic_boxed_row, t_connector_row_crop,
                   t_shift_classification, t_open_ids_candidates,
-                  t_late_pass_stub_rung_only, t_late_pass_all_or_nothing):
+                  t_late_pass_stub_rung_only, t_late_pass_all_or_nothing,
+                  t_late_pass_plane_retap, t_late_pass_crumb_pad, t_shift_preexisting_registered):
             try:
                 t(tmp)
             except Exception as e:                          # noqa: BLE001

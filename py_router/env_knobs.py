@@ -110,6 +110,9 @@ def refresh() -> None:
     # rule-clean via site. =0 disables (A/B).
     g['STUB_VIA_ESCAPE'] = _s('KICAD_STUB_VIA_ESCAPE', '1') != '0'
     g['STUB_VIA_SHIFT'] = _s('KICAD_STUB_VIA_SHIFT', '1') != '0'
+    # plane-tap shift (stub-via site walled by a plane net's tap copper):
+    # re-tap the pads the cut disconnects. =0 disables (A/B).
+    g['STUB_VIA_PLANE_SHIFT'] = _s('KICAD_STUB_VIA_PLANE_SHIFT', '1') != '0'
     # Terminal geometry escalation ("better than shipping opens", 2026-08-05):
     # post-rescue whole-net retry with track width + via size marching down
     # together toward the fab floor. =0 disables for A/B debugging.
