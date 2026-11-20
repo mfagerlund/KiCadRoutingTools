@@ -175,11 +175,32 @@ def _new_copper_collides(state, edge_sets) -> bool:
     return False
 
 
-def _try_net(state, net_name, net_id, walls, cfg_for, net_clearances,
-             cancel_check):
+def _attempt_on_ladder(pcb_data, net_id, rungs, net_clearances, cancel_check,
+                      scope_key):
+    """Route `net_id` at each rung in turn until one connects it fully; a
+    rung that does not is taken back. Returns (edges, fully)."""
+    from net_rescue import _attempt_net_at_geometry
+    from pcb_modification import remove_route_from_pcb_data
+    edges = []
+    for cfg in rungs:
+        if cancel_check and cancel_check():
+            break
+        edges, fully = _attempt_net_at_geometry(
+            pcb_data, net_id, cfg, net_clearances, cancel_check,
+            scope_key=scope_key)
+        if fully:
+            return edges, True
+        for r in reversed(edges):
+            remove_route_from_pcb_data(pcb_data, r)
+        edges = []
+    return edges, False
+
+
+def _try_net(state, net_name, net_id, walls, n_rungs, ladder_for,
+             net_clearances, cancel_check):
     """Rip `walls`, route the net, reroute the victims; all or nothing.
     Returns the victim order that landed, or None (board unchanged)."""
-    from net_rescue import _attempt_net_at_geometry, _net_component_info
+    from net_rescue import _net_component_info
     from pcb_modification import remove_route_from_pcb_data
 
     pcb_data = state.pcb_data
@@ -204,9 +225,9 @@ def _try_net(state, net_name, net_id, walls, cfg_for, net_clearances,
             for k in pe_new:
                 reg.pop(k, None)
 
-    edges, fully = _attempt_net_at_geometry(
-        pcb_data, net_id, cfg_for(net_id), net_clearances, cancel_check,
-        scope_key=('walled_rip',))
+    edges, fully = _attempt_on_ladder(pcb_data, net_id, n_rungs,
+                                      net_clearances, cancel_check,
+                                      ('walled_rip',))
     if not fully:
         _undo([(net_id, edges)])
         return None
@@ -222,9 +243,9 @@ def _try_net(state, net_name, net_id, walls, cfg_for, net_clearances,
             if cancel_check and cancel_check():
                 ok = False
                 break
-            ev, fv = _attempt_net_at_geometry(
-                pcb_data, w, cfg_for(w), net_clearances, cancel_check,
-                scope_key=('walled_victim',))
+            ev, fv = _attempt_on_ladder(pcb_data, w, ladder_for(w),
+                                        net_clearances, cancel_check,
+                                        ('walled_victim',))
             added.append((w, ev))
             if not fv:
                 ok = False
@@ -295,8 +316,13 @@ def walled_net_rip(state, scope_nets, net_clearances=None,
     if not candidates:
         return None
 
-    def cfg_for(nid):
-        return own_requirement_config(config, nid) or config
+    def ladder_for(nid):
+        # The net's own geometry first, then the terminal escalation's rungs
+        # (#1853 policy included): a net the escalation could reach only at
+        # a finer rung is probed and rerouted there, never below it.
+        from net_rescue import _escalation_ladder
+        own = own_requirement_config(config, nid) or config
+        return [own] + list(_escalation_ladder(config, pcb_data, nid) or [])
 
     _memo: Dict[int, bool] = {}
 
@@ -317,8 +343,16 @@ def walled_net_rip(state, scope_nets, net_clearances=None,
             progress_callback(idx + 1, len(candidates),
                               f"Walled-net rip: {net_name}")
         t_net = time.time()
-        walls = probe_walls(state, net_id, cfg_for(net_id), net_clearances,
-                            rippable, _cancel)
+        walls, n_rungs = None, []
+        rungs = ladder_for(net_id)
+        for k, cfg in enumerate(rungs):
+            if _cancel():
+                break
+            walls = probe_walls(state, net_id, cfg, net_clearances,
+                                rippable, _cancel)
+            if walls is not None:
+                n_rungs = rungs[k:]
+                break
         if walls is None:
             outcomes[net_name] = 'no corridor even without rippable copper'
             print(f"  walled rip: {net_name}: no corridor even with every "
@@ -336,7 +370,7 @@ def walled_net_rip(state, scope_nets, net_clearances=None,
             continue
         summary['attempted'] += 1
         print(f"  walled rip: {net_name}: ripping {', '.join(names)}")
-        order = _try_net(state, net_name, net_id, walls, cfg_for,
+        order = _try_net(state, net_name, net_id, walls, n_rungs, ladder_for,
                          net_clearances, _cancel)
         dt = time.time() - t_net
         if order is None:
