@@ -5198,6 +5198,19 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             state, _esc_scope, net_clearances=net_clearances,
             progress_callback=progress_callback, cancel_check=cancel_check)
     _lm_mark1801('the terminal escalation')
+    # Walled-net rip-and-reroute (walled_rip.py): a net still open here is
+    # walled by other nets' copper; rip the set blocking its cheapest
+    # corridor, route it, reroute the victims -- all or nothing, time-capped.
+    # Length-matched members are never ripped (the regrade below runs on the
+    # copper they have). KICAD_WALLED_RIP=0 disables.
+    walled_rip_summary = None
+    if not (_ckpt_stop or quick):
+        from walled_rip import walled_net_rip
+        walled_rip_summary = walled_net_rip(
+            state, _esc_scope, net_clearances=net_clearances,
+            progress_callback=progress_callback, cancel_check=cancel_check,
+            length_match_groups=length_match_groups)
+    _lm_mark1801('the walled-net rip')
     if length_match_groups and not _ckpt_stop and _lm_phase1801:
         from routing_common import regrade_late_group_members
         _lm_late = regrade_late_group_members(
@@ -6836,6 +6849,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # Terminal geometry escalation outcome per net: "recovered at WxS/D"
         # or "unrecovered" (key absent when nothing was attempted).
         summary['terminal_escalations'] = terminal_escalation_summary['nets']
+    if walled_rip_summary:
+        # Walled-net rip outcome per net (key absent when none attempted).
+        summary['walled_rips'] = walled_rip_summary['nets']
     if _pe_outcomes:
         # Main-pass pre-existing rips (0805): {victim net: outcome}. Key
         # absent when no pre-existing net was ripped.
