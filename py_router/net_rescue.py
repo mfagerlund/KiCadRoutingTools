@@ -1508,6 +1508,11 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
             # Checker says connected (zone credit etc.) - nothing to rescue,
             # and accounting stays whatever the run already decided.
             continue
+        if stub_via and net_id in (getattr(state, 'diff_pair_by_net_id',
+                                           None) or {}):
+            # the late stub pass is single-ended only: a stub on one leg of a
+            # pair breaks its coupling, and the pair's own stages own it
+            continue
         summary['attempted'] += 1
         print(f"  Rescuing {net_name} ({kind}, {num0} disconnected parts)")
 
@@ -1569,7 +1574,11 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                     continue
                 _cu = [l for l in _pad.layers if l.endswith('.Cu')]
                 try:
-                    _tr = tap_pad_with_escalation(
+                    # the late stub pass runs ONLY the stub rung: the tap and
+                    # fanout rungs already had their turn in the main rescue,
+                    # and rerun late they lay dogbones the later stages
+                    # then route around (stmp157: mem_cap)
+                    _tr = None if stub_via else tap_pad_with_escalation(
                         _pad, _cu[0] if _cu else None, net_id, pcb_data,
                         config, max_search_radius=1.5,
                         via_size=config.via_size,
@@ -1593,7 +1602,8 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                     # once the escape SHIPS (below the would-short guard).
                     _capmv666 = []
                     _stub666 = None
-                    if _fp is not None and len(_fp.pads) >= 12:
+                    if (_fp is not None and len(_fp.pads) >= 12
+                            and not stub_via):
                         try:
                             from bga_fanout import generate_bga_fanout
                             # Post-route: nothing will move a cap off a
@@ -1948,6 +1958,11 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
             if tap_results:
                 num0, comp_points, comp_pads = _net_component_info(
                     pcb_data, net_id)
+        if stub_via and not tap_results:
+            # nothing new to route from: leave the net as the main rescue
+            # left it, so the later stages see the board base would give them
+            print(f"    late stub pass: {net_name} has no stub escape, left as is")
+            continue
 
         edge_results = []
         used_widths = []

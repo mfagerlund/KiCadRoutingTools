@@ -286,6 +286,60 @@ def t_open_ids_candidates(tmp):
           got == [('A', 1, 'partial')], repr(got))
 
 
+def _late_pass(tmp, tag, diff_pair):
+    """Run the late pass (stub_via=True) on the 1-pad boxed row with the tap
+    rung instrumented; return (summary, tap calls, SIG's new segments)."""
+    import contextlib
+    import io
+    import plane_pad_tap
+    import net_rescue
+    path = os.path.join(tmp, f'{tag}.kicad_pcb')
+    _row_board(path, pitch=0.5, pad_w=0.3, pad_h=1.0, n=9, straight=1.2,
+               tw=0.25)
+    pcb = _load(path)
+    nid, _pad = _sig(pcb)
+    calls = []
+    real = plane_pad_tap.tap_pad_with_escalation
+
+    def spy(*a, **k):
+        calls.append(a)
+        return real(*a, **k)
+    from routing_state import RoutingState
+    state = RoutingState(pcb_data=pcb, config=_cfg())
+    state.working_obstacles = None
+    state.routed_results[nid] = {'path': []}
+    state.remaining_net_ids.append(nid)
+    if diff_pair:
+        state.diff_pair_by_net_id[nid] = ('SIG', None)
+    before = sum(1 for sg in pcb.segments if sg.net_id == nid)
+    plane_pad_tap.tap_pad_with_escalation = spy
+    try:
+        with contextlib.redirect_stdout(io.StringIO()):
+            summary = net_rescue.rescue_failed_nets(
+                state, [('SIG', nid)], stub_via=True, open_ids={nid})
+    finally:
+        plane_pad_tap.tap_pad_with_escalation = real
+    after = sum(1 for sg in pcb.segments if sg.net_id == nid)
+    return summary, calls, after - before
+
+
+def t_late_pass_stub_rung_only(tmp):
+    """The late pass runs ONLY the stub rung (no tap, no fanout: rerun late
+    they lay dogbones later stages must route around -- stmp157 mem_cap), and
+    never on a diff-pair member (cm5io: stubs on USB3 legs, pairs lost)."""
+    summary, calls, added = _late_pass(tmp, 'late_se', diff_pair=False)
+    check('late pass: the tap rung is never called', not calls,
+          f'{len(calls)} call(s)')
+    check('late pass: a single-ended boxed pad is attempted',
+          bool(summary) and summary['attempted'] == 1, repr(summary))
+    check('late pass: it gets a stub escape on the board', added > 0,
+          f'{added} new segment(s)')
+    summary, calls, added = _late_pass(tmp, 'late_dp', diff_pair=True)
+    check('late pass: a diff-pair member is not attempted',
+          (not summary or summary['attempted'] == 0) and added == 0
+          and not calls, repr(summary))
+
+
 def main():
     try:
         import stub_via_escape  # noqa: F401
@@ -294,7 +348,8 @@ def main():
         return 1
     with tempfile.TemporaryDirectory() as tmp:
         for t in (t_synthetic_boxed_row, t_connector_row_crop,
-                  t_shift_classification, t_open_ids_candidates):
+                  t_shift_classification, t_open_ids_candidates,
+                  t_late_pass_stub_rung_only):
             try:
                 t(tmp)
             except Exception as e:                          # noqa: BLE001
