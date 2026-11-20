@@ -79,13 +79,45 @@ def rippable_net(state, net_id: int, length_match_groups=None) -> bool:
                        diff_pair_by_net_id=state.diff_pair_by_net_id) is None
 
 
+SOFT_CELL_MM = 5.0   # as the #424 min-cut probe: cross only if needed
+
+
+def _stamp_soft(obstacles, pcb_data, cfg, segs, vias):
+    """Stamp each hidden net's track keep-out cells as a soft cost."""
+    import numpy as np
+    from blocking_analysis import compute_net_obstacle_cells, _unpack_xy
+    by_s, by_v = {}, {}
+    for x in segs:
+        by_s.setdefault(x.net_id, []).append(x)
+    for x in vias:
+        by_v.setdefault(x.net_id, []).append(x)
+    cost = cfg.cell_cost(SOFT_CELL_MM)
+    rows = []
+    for nid in set(by_s) | set(by_v):
+        tk, _vk = compute_net_obstacle_cells(
+            pcb_data, nid, None, cfg, net_segments=by_s.get(nid, []),
+            net_vias=by_v.get(nid, []))
+        for keys in (tk,):
+            if not len(keys):
+                continue
+            gx, gy = _unpack_xy(keys)
+            li = keys & 0xFF
+            rows.append(np.stack([li, gx, gy, np.full_like(gx, cost)],
+                                 axis=1))
+    if rows:
+        obstacles.set_layer_proximity_batch(
+            np.concatenate(rows).astype(np.int32))
+
+
 def probe_walls(state, net_id: int, cfg, net_clearances, rippable,
                 cancel_check=None) -> Optional[List[int]]:
     """The nets walling `net_id`'s cheapest corridor, most items first: route
-    the net with every rippable foreign net's copper hidden, collect what that
-    route collides with, take the route back. None when the net does not
-    connect even then (no rip can help); [] when it connects with nothing in
-    the way (the earlier passes would have taken it)."""
+    the net with every rippable foreign net's copper lifted from the map and
+    its cells stamped as a soft cost instead (the #424 min-cut probe's
+    pricing), so the search crosses the fewest foreign cells it must; collect
+    what that route collides with, take the route back. None when the net
+    does not connect even then (no rip can help); [] when it connects with
+    nothing in the way (the earlier passes would have taken it)."""
     from net_rescue import _attempt_net_at_geometry
     from pcb_modification import bump_copper_epoch, remove_route_from_pcb_data
     from rip_up_reroute import _saved_route_colliders
@@ -103,7 +135,9 @@ def probe_walls(state, net_id: int, cfg, net_clearances, rippable,
     try:
         edges, fully = _attempt_net_at_geometry(
             pcb_data, net_id, cfg, net_clearances, cancel_check,
-            scope_key=('walled_probe',))
+            scope_key=('walled_probe',),
+            obstacle_hook=lambda obs: _stamp_soft(obs, pcb_data, cfg,
+                                                  hidden_s, hidden_v))
         probe = {'new_segments': [s for r in edges for s in r['new_segments']],
                  'new_vias': [v for r in edges for v in r.get('new_vias', [])]}
         for r in reversed(edges):

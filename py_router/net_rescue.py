@@ -2207,7 +2207,7 @@ def _size_escalation_ladder(config, pcb_data, net_id):
 
 def _attempt_net_at_geometry(pcb_data, net_id, cfg, net_clearances,
                              cancel_check=None, scope_key=('full',),
-                             stats=None, progress=None):
+                             stats=None, progress=None, obstacle_hook=None):
     """One escalation rung: a BOARD-GLOBAL obstacle map rebuilt at the rung's
     geometry (a smaller width/via gains nothing on the run's shared map --
     its inflation is baked at the run geometry, the #371 lesson), then the
@@ -2222,6 +2222,8 @@ def _attempt_net_at_geometry(pcb_data, net_id, cfg, net_clearances,
     Each gap attempt prints one line (#1806: its ends, outcome, iterations,
     seconds) and, given `progress` (a callable taking the text), reports it
     there too; `stats` accumulates the rung's searches and iterations.
+    `obstacle_hook(obstacles)`, given, edits the per-call map clone before
+    the first search (the walled-net probe's soft costs).
     """
     from obstacle_map import (build_base_obstacle_map,
                               add_same_net_via_clearance,
@@ -2240,6 +2242,8 @@ def _attempt_net_at_geometry(pcb_data, net_id, cfg, net_clearances,
     add_same_net_pad_drill_via_clearance(obstacles, pcb_data, net_id, cfg)
     # #1146: the keep-away band (a per-call clone; nothing to clear).
     stamp_keep_away(obstacles, cfg, pcb_data, net_id)
+    if obstacle_hook is not None:
+        obstacle_hook(obstacles)
 
     edge_results = []
     failed_gaps = set()
