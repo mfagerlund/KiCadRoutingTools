@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """A plane tap's new via stays out of neighbour pads' escape lanes.
 
-tiliqua's HDMI J10 (0.5 mm pitch, 1.9 x 0.3 mm pads) interleaves GND with the
-TMDS pairs. The route-floors finalize tapped GND pin 8 with a via 0.49 mm past
-the end of D0+'s pad (pin 7), in D0+'s only escape lane; D0+'s reconnect then
-failed, stuck at J10.7. bitaxe's taps0 did the same at U14 (VDD3_0 lane).
+An HDMI connector (0.5 mm pitch, 1.9 x 0.3 mm pads) interleaves GND with the
+TMDS pairs. A rip-up plane tap of a GND pin placed its via 0.49 mm past the end
+of the neighbouring TMDS pad, in that pad's only escape lane; the TMDS reconnect
+then failed at that pad. A fine-pitch QFN power pin was walled in the same way.
 
 Checks (try_tap_pad(plane_tap=True), as repair_planes calls it, on a synthetic
 board: a 3-pad row SIG_A / GND / SIG_B at 0.5 mm pitch on the east side of a

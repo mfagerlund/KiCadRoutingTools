@@ -78,8 +78,8 @@ def pad_is_fine_pitch(pad: Pad, pcb_data: PCBData) -> bool:
 # Escape-lane guard for a tap's new via. A fine-pitch connector or IC row
 # escapes each signal pad straight out of its outer end; a plane tap via
 # dropped just past a NEIGHBOUR pad's end sits in that pad's only escape lane
-# and walls the signal in (tiliqua J10 HDMI: the GND pin-8 tap via landed
-# 0.49 mm past D0+'s pad end and D0+ never reconnected). The guard rejects
+# and walls the signal in (an HDMI connector's GND tap via landed 0.49 mm
+# past a TMDS pad's end and that pad never reconnected). The guard rejects
 # via sites inside the outward lane of foreign-net elongated SMD pads of the
 # tap pad's own footprint near the tap; try_tap_pad falls back to the
 # unguarded search when it leaves no site.
