@@ -75,6 +75,77 @@ def pad_is_fine_pitch(pad: Pad, pcb_data: PCBData) -> bool:
     return False
 
 
+# Escape-lane guard for a tap's new via. A fine-pitch connector or IC row
+# escapes each signal pad straight out of its outer end; a plane tap via
+# dropped just past a NEIGHBOUR pad's end sits in that pad's only escape lane
+# and walls the signal in (tiliqua J10 HDMI: the GND pin-8 tap via landed
+# 0.49 mm past D0+'s pad end and D0+ never reconnected). The guard rejects
+# via sites inside the outward lane of foreign-net elongated SMD pads of the
+# tap pad's own footprint near the tap; try_tap_pad falls back to the
+# unguarded search when it leaves no site.
+LANE_GUARD_REACH = 2.0       # mm, tap pad centre to neighbour pad centre
+LANE_GUARD_MIN_ASPECT = 1.5  # long/short pad side: only escape-shaped pads
+LANE_GUARD_LEN_VIAS = 2.0    # lane length past the pad end, in via sizes
+
+
+def escape_lane_site_filter(pad: Pad, pcb_data: PCBData, net_id: int,
+                            via_size: float, config: GridRouteConfig):
+    """Return ok(x, y) rejecting via centres in a neighbour pad's escape lane,
+    or None when no neighbour qualifies.
+
+    A lane starts at the neighbour pad's outer end (outward = along its long
+    axis, away from the footprint centre) and runs LANE_GUARD_LEN_VIAS via
+    sizes further out; a via centre closer to its centreline than
+    track/2 + clearance + via/2 leaves no room for the signal's track.
+    """
+    footprint = pcb_data.footprints.get(pad.component_ref)
+    if footprint is None:
+        return None
+    half_w = config.track_width / 2 + config.clearance + via_size / 2
+    length = LANE_GUARD_LEN_VIAS * via_size
+    lanes = []
+    for other in footprint.pads:
+        if other is pad or other.pad_number == pad.pad_number:
+            continue
+        if not other.net_id or other.net_id == net_id:
+            continue
+        if (other.net_name or '').startswith('unconnected-'):
+            continue
+        if getattr(other, 'pad_type', '') not in ('smd', ''):
+            continue
+        if math.hypot(other.global_x - pad.global_x,
+                      other.global_y - pad.global_y) > LANE_GUARD_REACH:
+            continue
+        long_side = max(other.size_x, other.size_y)
+        short_side = min(other.size_x, other.size_y)
+        if short_side <= 0 or long_side < LANE_GUARD_MIN_ASPECT * short_side:
+            continue
+        rad = math.radians(getattr(other, 'rect_rotation', 0.0) or 0.0)
+        c, s = math.cos(rad), math.sin(rad)
+        # _to_pad_frame: local x axis = (c, s), local y axis = (-s, c).
+        ax, ay = (c, s) if other.size_x >= other.size_y else (-s, c)
+        side = ((other.global_x - footprint.x) * ax
+                + (other.global_y - footprint.y) * ay)
+        if abs(side) < 1e-6:
+            continue
+        if side < 0:
+            ax, ay = -ax, -ay
+        ex = other.global_x + ax * long_side / 2
+        ey = other.global_y + ay * long_side / 2
+        lanes.append((ex, ey, ax, ay))
+    if not lanes:
+        return None
+
+    def ok(x, y):
+        for ex, ey, ax, ay in lanes:
+            dx, dy = x - ex, y - ey
+            t = dx * ax + dy * ay
+            if 0.0 <= t <= length and abs(-dx * ay + dy * ax) < half_w:
+                return False
+        return True
+    return ok
+
+
 def note_clearance_used(pcb_data: PCBData, clearance: float, net_id=None,
                         requested=None, site=None) -> None:
     """Record that a routing step used ``clearance`` mm of copper clearance, so
@@ -1480,19 +1551,34 @@ def try_tap_pad(
             return corridor_ghosts.via_site_clear(x, y, via_size,
                                                   exclude_net_ids=_gx_ids)
 
-    failed_positions: Set[Tuple[int, int]] = set()
-    via_pos = find_via_position(
-        pad, obstacles, coord, max_search_radius,
-        routing_obstacles=routing_obs,
-        config=config,
-        pad_layer=pad_layer,
-        net_id=net_id,
-        verbose=verbose,
-        failed_route_positions=failed_positions,
-        pending_pads=pending_pads,
-        position_filter=zone_filter,
-        position_preference=ghost_pref,
-    )
+    # Keep the via out of neighbour pads' escape lanes when another site
+    # exists (escape_lane_site_filter); otherwise search as before.
+    _lane_ok = escape_lane_site_filter(pad, pcb_data, net_id, via_size, config)
+    if _lane_ok is not None:
+        _base_filter = zone_filter
+
+        def lane_filter(x, y):
+            return _lane_ok(x, y) and (_base_filter is None or _base_filter(x, y))
+        _filters = (lane_filter, zone_filter)
+    else:
+        _filters = (zone_filter,)
+
+    for _pf in _filters:
+        failed_positions: Set[Tuple[int, int]] = set()
+        via_pos = find_via_position(
+            pad, obstacles, coord, max_search_radius,
+            routing_obstacles=routing_obs,
+            config=config,
+            pad_layer=pad_layer,
+            net_id=net_id,
+            verbose=verbose,
+            failed_route_positions=failed_positions,
+            pending_pads=pending_pads,
+            position_filter=_pf,
+            position_preference=ghost_pref,
+        )
+        if via_pos is not None:
+            break
     if via_pos is None:
         # No via site anywhere in the search radius. Before giving up, try
         # connecting to a nearby same-net pad/via with a trace (the human's
