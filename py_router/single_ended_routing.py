@@ -1389,10 +1389,15 @@ def _unblock_via_refit(pcb_data, net_id, x, y, rec, config):
     # escalation_rungs, not the ladder: empty under --escalation off, raised
     # to the board's own minimums under board (#857) and the net's rule
     # minimums (#530).
-    for f in escalation_rungs(ncu, extra_floors=config.rule_floors(net_id)):
+    # A ring-short rung is offered under board too: every candidate's hole
+    # is held at the board's hole clearance below (board_hole_floor).
+    for f in escalation_rungs(ncu, extra_floors=config.rule_floors(net_id),
+                              hole_ring_by_keepout=True):
         pair = (round(f['via_diameter'], 3), round(f['via_drill'], 3))
         if pair[0] < rec[0] - 1e-9 and pair not in cands:
             cands.append(pair)
+    from fab_tiers import board_hole_floor
+    _hf = board_hole_floor()
     _own, _ncl = _pair_floor(config, net_id)
     _stack = (config.stack_clearance(_own)
               if hasattr(config, 'stack_clearance') else _own)
@@ -1414,11 +1419,26 @@ def _unblock_via_refit(pcb_data, net_id, x, y, rec, config):
                                     config=config, own_type='via') < need:
                 ok = False
                 break
+            # the hole, at the board's hole clearance (0 off board), binds
+            # where the ring round the drill is short of it; measured raw
+            # (no class excess folded: the hole clearance is one board value)
+            _hneed = dr / 2.0 + _hf - eps
+            if _hf > 0 and _hneed > need and (
+                    _seg_foreign_seg_dist(pcb_data, net_id, x, y, x, y, layer)
+                    < _hneed or
+                    _pt_foreign_pad_dist(pcb_data, net_id, x, y, layer)
+                    < _hneed):
+                ok = False
+                break
         if ok and _seg_foreign_via_dist(
                 pcb_data, net_id, x, y, x, y,
                 layers[0] if layers else 'F.Cu', net_clearances=_ncl,
                 base_clearance=_stack, config=config,
                 own_type='via') < vs / 2.0 + _stack - eps:
+            ok = False
+        if ok and _hf > 0 and dr / 2.0 + _hf > vs / 2.0 + _stack and                 _seg_foreign_via_dist(
+                    pcb_data, net_id, x, y, x, y,
+                    layers[0] if layers else 'F.Cu') < dr / 2.0 + _hf - eps:
             ok = False
         # #671: _seg_foreign_via_dist is FOREIGN-only, and copper clearance
         # should be -- two same-net barrels may touch. The DRILL hole-to-hole

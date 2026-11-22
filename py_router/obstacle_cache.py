@@ -763,7 +763,9 @@ def _small_via_pair(config, pcb_data):
         ncu = len([l for l in (pcb_data.board_info.copper_layers or [])
                    if l.endswith('.Cu')]) or 2
         # None under --escalation off: no small-via rung exists to search at.
-        for f in escalation_rungs(ncu):
+        # the rung-1 keep-outs are stamped through via_hole_extra, which
+        # holds a ring-short rung at the board's hole clearance
+        for f in escalation_rungs(ncu, hole_ring_by_keepout=True):
             pair = (round(f['via_diameter'], 3), round(f['via_drill'], 3))
             if pair[0] < config.via_size - 1e-9:
                 return pair
