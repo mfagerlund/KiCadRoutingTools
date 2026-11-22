@@ -1440,18 +1440,30 @@ class GridCoord:
         return lo, hi
 
 
+_FAB_TIERS = None
+
+
 def _board_hole_floor(config, clearance: float, other_via=None) -> float:
     """The mm the board's own hole clearance adds to a NEW via's keep-out
     under ``--escalation board`` (`fab_tiers.board_hole_floor`; see
     `GridRouteConfig.via_hole_extra`): 0.0 under any other policy, with no
-    clearance pair installed, or where the ring round the drill holds it."""
-    from fab_tiers import board_hole_floor
-    hc = board_hole_floor()
-    if hc <= 0:
+    clearance pair installed, or where the ring round the drill holds it.
+
+    Called once per obstacle in every map build, so it reads the installed
+    pair straight off `fab_tiers` rather than importing per call."""
+    global _FAB_TIERS
+    ft = _FAB_TIERS
+    if ft is None:
+        import fab_tiers as ft
+        _FAB_TIERS = ft
+    pair = ft._VIA_HOLE_CLEARANCE
+    if not pair or ft._ESCALATION != 'board':
         return 0.0
-    out = max(0.0, config.via_drill / 2.0 + hc - config.via_size / 2.0 - clearance)
-    drill = float(getattr(other_via, 'drill', 0.0) or 0.0) if other_via is not None else 0.0
-    if drill > 0:
-        size = float(getattr(other_via, 'size', 0.0) or 0.0) or config.via_size
-        out = max(out, drill / 2.0 + hc - size / 2.0 - clearance)
-    return out
+    hc = pair[0]
+    out = config.via_drill / 2.0 + hc - config.via_size / 2.0 - clearance
+    if other_via is not None:
+        drill = getattr(other_via, 'drill', 0.0) or 0.0
+        if drill > 0:
+            size = getattr(other_via, 'size', 0.0) or config.via_size
+            out = max(out, drill / 2.0 + hc - size / 2.0 - clearance)
+    return out if out > 0.0 else 0.0
