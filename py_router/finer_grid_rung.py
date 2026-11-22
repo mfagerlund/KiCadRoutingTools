@@ -66,3 +66,47 @@ def plan(open_targets: dict, outer_boxed: set, grid_step: float,
             f"over {n_layers} layer(s), past the "
             f"{defaults.FINER_GRID_RUNG_MAX_CELLS / 1e6:.0f}M budget")
     return names, fine, cells, None
+
+
+def floor_geometry(config, pcb_data, net_ids, track_width, via_size):
+    """The rung lap's track width and via at the board floor (#NNNN).
+
+    A net boxed in at the run's grid is usually boxed in at the run's WIDTH
+    too: off-grid fine-pitch pads leave room for a floor-width track between
+    their neighbours, not for the nominal one, and the half grid alone cannot
+    make the nominal track fit. Every other retry the run makes already steps
+    the width down (the per-net rescue, the terminal escalation) -- but those
+    have no rip authority, and the rung, which has, kept the nominal width.
+
+    Returns the batch_route overrides for the lap: ``track_width`` at the
+    narrowest track every target may carry (the fab floor raised to each
+    target's own rule minimum, ``config.track_floor``) and ``via_size`` /
+    ``via_drill`` at the first escalation rung smaller than the lap's via that
+    meets every target's floors. A key is omitted when it would not shrink;
+    the dict is empty under --escalation off (the half grid is then the only
+    change, #842)."""
+    from fab_tiers import may_narrow, escalation_rungs
+    from plane_pad_tap import fab_floor_clearance_track
+    if not may_narrow() or not net_ids:
+        return {}
+    out = {}
+    _c, fab_track = fab_floor_clearance_track(pcb_data)
+    layers = list(config.layers or []) or [None]
+    floor = max(config.track_floor(nid, layer, fab_track)
+                for nid in net_ids for layer in layers)
+    if track_width and floor < track_width - 1e-9:
+        out['track_width'] = floor
+    if via_size:
+        n_layers = len(pcb_data.board_info.copper_layers) or 2
+        dia = drill = 0.0
+        for nid in net_ids:
+            ladder = [r for r in escalation_rungs(
+                n_layers, extra_floors=config.rule_floors(nid))
+                if r['via_diameter'] < via_size - 1e-9]
+            if not ladder:
+                return out
+            dia = max(dia, ladder[0]['via_diameter'])
+            drill = max(drill, ladder[0]['via_drill'])
+        if dia < via_size - 1e-9:
+            out['via_size'], out['via_drill'] = dia, drill
+    return out

@@ -9176,14 +9176,35 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 else:
                     _fresh = []
                 _rk['grid_step'] = _fine
+                # #NNNN: and at the board floor's track and via -- the half
+                # grid alone cannot fit the nominal track between off-grid
+                # fine-pitch pads the floor track threads.
+                _ids1763 = [nid for nid, net in pcb_data.nets.items()
+                            if net.name in set(_names)]
+                _geo1763 = _fgr1763.floor_geometry(
+                    config, pcb_data, _ids1763,
+                    _rk.get('track_width') or config.track_width,
+                    _rk.get('via_size'))
+                _rung1763['restore'] = {k: _rk.get(k) for k in _geo1763}
+                _rk.update(_geo1763)
                 _rung1763['active'] = True
                 print(f"  Finer-grid rung (#1763): {len(_names)} net(s) still "
                       f"boxed in at grid {_rung1763['grid']:g} -- one more "
                       f"lap at grid {_fine:g} ({_cells / 1e6:.1f}M cells)"
                       + (f" with rip authority over {', '.join(_fresh)}"
                          if _fresh else "")
+                      + (f" at track {_geo1763['track_width']:g}"
+                         if 'track_width' in _geo1763 else "")
+                      + (f" via {_geo1763['via_size']:g}/"
+                         f"{_geo1763['via_drill']:g}"
+                         if 'via_size' in _geo1763 else "")
                       + f": {', '.join(_names)}")
                 return _names
+
+            def _end_rung1763():
+                """Back to the run's grid and geometry after the rung."""
+                _rk['grid_step'] = _rung1763['grid']
+                _rk.update(_rung1763.pop('restore', None) or {})
 
             def _next_lap1763(_lrok, _lrfail, _lap):
                 """The lap loop's continue decision. Returns the names the
@@ -9378,13 +9399,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # a pair open against its partner -- route the pair as a
                 # unit on a cleared row, kept only when it closes cleanly.
                 if _rfail:
-                    _rk['grid_step'] = _rung1763['grid']
+                    _end_rung1763()
                     _pok = _pair_unit_lap(output_file, _rk,
                                           _filter_rip_hints103)
                     if _pok:
                         _rok += _pok
                         _rfail = max(0, _rfail - _pok)
-            _rk['grid_step'] = _rung1763['grid']
+            _end_rung1763()
             # #1339: the forced links no lap landed (a lap that ended the
             # loop without failures was never harvested, so drop its landed
             # nets here too) -- the nets whose exact-fill verdict is still
