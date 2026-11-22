@@ -34,6 +34,8 @@ Checks (clearance 0.1, hole clearance 0.25, standard tier, 4 layers):
      limit: it ships only where its hole holds the hole clearance.
   8. net rescue under board offers the 0.45/0.2 rung, and every such rung
      keeps its hole clear by keep-out (via_hole_extra > 0).
+  9. net rescue offers each step-down via once: board floors raise several
+     tiers to the same via, and a repeated rung only re-routes the same map.
 
     python3 tests/test_2018_ring_short_by_keepout.py
 """
@@ -184,6 +186,18 @@ def main():
            small and all(r.via_hole_extra(0.1) > 0 for r in small),
            [(round(r.via_size, 3), round(r.via_hole_extra(0.1), 4))
             for r in rungs])
+        # the auto tier's three rungs, all raised to the board's 0.45/0.2
+        fab_tiers.set_default_fab_tier('auto')
+        fab_tiers.set_escalation_policy(
+            'board', {'via_diameter': 0.45, 'via_drill': 0.2, 'clearance': 0.1})
+        fab_tiers.set_via_hole_clearance(0.25, 0.1)
+        rr = list(net_rescue._rescue_rungs(cfg(), 0.025, rp, OWN))
+        keys = [(round(r.via_size, 6), round(r.via_drill, 6),
+                 round(r.track_width, 6), round(r.clearance, 6),
+                 round(r.grid_step, 6)) for r in rr]
+        ok('9. board net rescue: no repeated rung',
+           len(keys) == len(set(keys)) and (0.45, 0.2) in [k[:2] for k in keys],
+           keys)
     finally:
         fab_tiers.set_via_hole_clearance(None, None)
         fab_tiers.set_escalation_policy(saved_esc, {})

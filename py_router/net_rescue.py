@@ -644,10 +644,17 @@ def _rescue_rungs(config, fine_grid, pcb_data, net_id):
                                hole_ring_by_keepout=True)
     # Smaller than the via this NET draws (its own #530 via, else the run's).
     _own_via = config.net_via(net_id)[0]
+    _seen_vias = set()
     for floor in _ladder:
         v_dia, v_drill = floor['via_diameter'], floor['via_drill']
         if v_dia >= _own_via - 1e-9:
             continue
+        # Board floors raise several tiers to one via: each step-down rung is
+        # the floor rung at that via, so a repeat routes the same map again.
+        _vkey = (round(v_dia, 6), round(v_drill, 6))
+        if _vkey in _seen_vias:
+            continue
+        _seen_vias.add(_vkey)
         if ladder_escalates(_ladder, v_dia, v_drill):
             warn_fab_escalation(f"net rescue net_{net_id}")
         rungs.append(_via_step_down(config, net_id, grid_step=fine_grid,
