@@ -6255,7 +6255,10 @@ def finger_band_areas(pcb_data):
     reads an area: the regions the router keeps copper out of
     (`net_keepouts.derive_finger_bands`). [] when the board has none."""
     from net_keepouts import derive_finger_bands
-    return [dict(ko, in_footprint=True) for ko in derive_finger_bands(pcb_data)]
+    # an entry lane reserves a finger's approach for routing; a finished
+    # board's copper there is no strip defect
+    return [dict(ko, in_footprint=True) for ko in derive_finger_bands(pcb_data)
+            if ko.get('finger_band') != 'entry']
 
 
 def _finger_band_pass(pcb_data, routing_layers, matching_net_ids, baseline_pd,

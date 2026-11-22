@@ -492,6 +492,13 @@ FINGER_EDGE_REACH = 2.0
 #: (a keying notch, a split connector) ends a run: the band does not bridge it.
 FINGER_RUN_BREAK = 2.0
 
+#: How far in front of a finger's inner end its entry lane runs: the strip
+#: admits a finger only from its inner end, so a neighbour's via or track
+#: parked there boxes the finger in. Room for the finger's own track to leave
+#: it and drop its own via (a 0.5-0.6 mm via plus clearance) before any other
+#: net's copper.
+FINGER_ENTRY_DEPTH = 1.0
+
 
 def derive_finger_bands(pcb_data) -> List[dict]:
     """The strip a mating edge connector's fingers occupy, from each finger's
@@ -628,6 +635,15 @@ def derive_finger_bands(pcb_data) -> List[dict]:
                                 'finger_band': 'column', 'ref': ref,
                                 'pad': p.pad_number})
                     if own:
+                        ent = inner[i] - sign * FINGER_ENTRY_DEPTH
+                        out.append({'name': f"finger entry {ref}.{p.pad_number} {layer}",
+                                    'rule': None,
+                                    'polygon': rect(lefts[i], rights[i], ent, inner[i]),
+                                    'holes': [], 'layers': {layer},
+                                    'tracks_allowed': False, 'vias_allowed': False,
+                                    'nets': names - {own}, 'clearance': 0.0,
+                                    'finger_band': 'entry', 'ref': ref,
+                                    'pad': p.pad_number})
                         out.append({'name': f"finger tail {ref}.{p.pad_number} {layer}",
                                     'rule': None,
                                     'polygon': rect(lefts[i], rights[i], outer[i], edge),
