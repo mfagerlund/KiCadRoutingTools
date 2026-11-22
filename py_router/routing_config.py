@@ -692,11 +692,18 @@ class GridRouteConfig:
         plus the clearance. The copper is a track unless ``pad`` (that pad)
         or ``other_via`` (an existing via, whose own hole the new via's copper
         is held off the same way) is given, each read as the item it is.
-        0.0 with no such rule."""
+        0.0 with no such rule.
+
+        Under ``--escalation board`` the board's own hole clearance (the pair
+        :func:`fab_tiers.set_via_hole_clearance` installed) binds the same way
+        (#2018 follow-up): the new via's hole is held that far off the copper,
+        and the new via's copper that far off another via's hole, so a
+        ring-short rung is placed only where it is clean."""
+        out = _board_hole_floor(self, clearance, other_via)
         if self.hole_rules is None:
-            return 0.0
+            return out
         from hole_rule_routing import via_hole_extra
-        return via_hole_extra(self, clearance, other_via, pad)
+        return max(out, via_hole_extra(self, clearance, other_via, pad))
 
     def stack_clearance(self, fallback: float, net_id: Optional[int] = None,
                         pad=None, graphic: bool = False) -> float:
@@ -1431,3 +1438,20 @@ class GridCoord:
             lo = lo_n + k + math.floor(lo_a + b)
             hi = hi_n - k + math.ceil(hi_a - b)
         return lo, hi
+
+
+def _board_hole_floor(config, clearance: float, other_via=None) -> float:
+    """The mm the board's own hole clearance adds to a NEW via's keep-out
+    under ``--escalation board`` (`fab_tiers.board_hole_floor`; see
+    `GridRouteConfig.via_hole_extra`): 0.0 under any other policy, with no
+    clearance pair installed, or where the ring round the drill holds it."""
+    from fab_tiers import board_hole_floor
+    hc = board_hole_floor()
+    if hc <= 0:
+        return 0.0
+    out = max(0.0, config.via_drill / 2.0 + hc - config.via_size / 2.0 - clearance)
+    drill = float(getattr(other_via, 'drill', 0.0) or 0.0) if other_via is not None else 0.0
+    if drill > 0:
+        size = float(getattr(other_via, 'size', 0.0) or 0.0) or config.via_size
+        out = max(out, drill / 2.0 + hc - size / 2.0 - clearance)
+    return out

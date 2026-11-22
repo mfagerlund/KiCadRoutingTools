@@ -772,6 +772,18 @@ def get_via_hole_clearance():
     return _VIA_HOLE_CLEARANCE
 
 
+def board_hole_floor():
+    """The hole clearance every NEW via's hole is held at off other-net copper
+    (and its copper off another via's hole) under ``--escalation board``: the
+    installed :func:`set_via_hole_clearance` value, else 0.0 (any other
+    policy, or no pair installed). A via whose ring holds it needs nothing
+    more than the clearance; a ring-short one is kept that far by its
+    keep-out (`GridRouteConfig.via_hole_extra`, the #189 refit)."""
+    if not _VIA_HOLE_CLEARANCE or _ESCALATION != 'board':
+        return 0.0
+    return _VIA_HOLE_CLEARANCE[0]
+
+
 def via_hole_ring():
     """The annular ring a via must hold so another net's copper, kept at the
     run's clearance off the via's copper, sits at the hole clearance off its
@@ -890,7 +902,7 @@ def _apply_hole_ring(rungs, ring):
 TIER_RUNG_KEY = 'tier_rung'
 
 
-def _prefer_hole_ring(rungs, ring):
+def _prefer_hole_ring(rungs, ring, by_keepout=False):
     """#1914: the ladder ``rungs`` with the copper-to-hole ring PREFERRED
     under ``fab`` and REQUIRED under ``board`` (#2018).
 
@@ -913,7 +925,14 @@ def _prefer_hole_ring(rungs, ring):
     Each rung carries :data:`TIER_RUNG_KEY`, its index in ``rungs``, so a
     site that tells a fab-tier escalation by the rung (:func:`rung_tier`,
     :func:`ladder_escalates`) reads the nominal rung's raised and unraised
-    vias as the nominal, not as an escalation."""
+    vias as the nominal, not as an escalation.
+
+    ``by_keepout``: the caller holds every via it places at the board's hole
+    clearance off other-net copper by its KEEP-OUT (`board_hole_floor`), so
+    under ``board`` the rung as it is follows its raised twin, as under
+    ``fab``. The raised twin alone loses sites on a pair whose clearance
+    exceeds the one the ring is priced at: there its copper needs more room
+    than the short via held at the hole clearance."""
     def _key(r):
         return {k: v for k, v in r.items() if k != TIER_RUNG_KEY}
     out, seen = [], []
@@ -928,7 +947,7 @@ def _prefer_hole_ring(rungs, ring):
         # site the short via took against the board edge or another net's
         # bare (NPTH) hole, which only the copper is graded against.
         cands = ((_apply_hole_ring([tagged], ring)[0],)
-                 if _ESCALATION == 'board' else
+                 if _ESCALATION == 'board' and not by_keepout else
                  (_apply_hole_ring([tagged], ring)[0], tagged))
         for cand in cands:
             if _key(cand) not in seen:
@@ -1092,7 +1111,7 @@ def fab_floor_ladder(copper_layer_count, tier=None, overrides=None):
 
 
 def escalation_rungs(copper_layer_count, tier=None, overrides=None,
-                     extra_floors=None):
+                     extra_floors=None, hole_ring_by_keepout=False):
     """The rungs a DESCENT site may step down through: ``fab_floor_ladder``
     under ``board`` / ``fab``, and NOTHING under ``off`` (an empty list --
     every site that walks it then keeps the requested geometry and reports).
@@ -1102,7 +1121,11 @@ def escalation_rungs(copper_layer_count, tier=None, overrides=None,
     ``extra_floors`` (a FLOOR_KEYS dict, e.g. ``GridRouteConfig.rule_floors``
     for the net being descended) raises the rungs further under ``board``:
     the .kicad_dru minimums that bind THIS net, which the process-wide board
-    floors cannot carry because they are per net and per layer."""
+    floors cannot carry because they are per net and per layer.
+
+    ``hole_ring_by_keepout``: the caller checks every via against
+    :func:`board_hole_floor`, so under ``board`` a ring-short rung is offered
+    after its raised twin (:func:`_prefer_hole_ring`)."""
     if not may_narrow():
         return []
     rungs = fab_floor_ladder(copper_layer_count, tier, overrides)
@@ -1133,7 +1156,7 @@ def escalation_rungs(copper_layer_count, tier=None, overrides=None,
     # _BOARD_FLOORS.
     ring = via_hole_ring()
     if ring and rungs:
-        rungs = _prefer_hole_ring(rungs, ring)
+        rungs = _prefer_hole_ring(rungs, ring, by_keepout=hole_ring_by_keepout)
     return rungs
 
 
