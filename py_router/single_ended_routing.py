@@ -4142,7 +4142,8 @@ def _place_shrunk_via_in_pad_impl(pad_obj, obstacles, config, pcb_data, net_id, 
     # under board). The advanced rung is the more-costly small via 'auto'
     # escalates to (#237/#857).
     from fab_tiers import escalation_rungs, note_narrowing, rung_tier
-    ladder = escalation_rungs(ncu, extra_floors=config.rule_floors(net_id))
+    ladder = escalation_rungs(ncu, extra_floors=config.rule_floors(net_id),
+                              hole_ring_by_keepout=True)
     candidates = [(config.via_size, config.via_drill, False)]
     # rung_tier: the tier rung each was made from (#1914), so the nominal
     # rung's ring-holding and last-resort vias are not escalations
