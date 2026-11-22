@@ -27,7 +27,11 @@ Checks (clearance 0.1, hole clearance 0.25, standard tier, 4 layers):
      fits (its hole measured raw, not class-folded) and is returned;
   4. refit under board, a track the 0.45/0.2 clears by copper but not by
      hole: nothing fits (no ring-short via inside the hole clearance);
-  5. refit under fab at the same site: the 0.45/0.2 ships (fab unchanged).
+  5. refit under fab at the same site: the 0.45/0.2 ships (fab unchanged);
+  6. via-in-pad unblock under board, a pad boxed by class-0.15 tracks: the
+     0.45/0.2 drops where the 0.5/0.2 does not fit;
+  7. the same, boxed by board-clearance tracks around the 0.45/0.2's hole
+     limit: it ships only where its hole holds the hole clearance.
 
     python3 tests/test_2018_ring_short_by_keepout.py
 """
@@ -40,8 +44,8 @@ sys.path.insert(0, TESTS)
 sys.path.insert(0, os.path.join(ROOT, 'py_router'))
 
 import fab_tiers  # noqa: E402
-from kicad_parser import BoardInfo, Net  # noqa: E402
-from routing_config import GridRouteConfig  # noqa: E402
+from kicad_parser import BoardInfo, Net, Pad  # noqa: E402
+from routing_config import GridCoord, GridRouteConfig  # noqa: E402
 from synth import make_seg, make_via, make_pcb  # noqa: E402
 
 OWN, FOREIGN = 1, 99
@@ -74,6 +78,30 @@ def board(track_y):
                                        width=0.2)],
                     board_info=bi,
                     nets={OWN: Net(OWN, '/OWN'), FOREIGN: Net(FOREIGN, '/F')})
+
+
+def boxed_pad(half):
+    """An OWN pad at the origin boxed by four FOREIGN tracks `half` off it."""
+    pad = Pad(pad_number='1', net_id=OWN, net_name='/OWN', global_x=0.0,
+              global_y=0.0, size_x=0.3, size_y=0.3, shape='rect',
+              layers=['F.Cu'], drill=0, component_ref='U1', local_x=0.0,
+              local_y=0.0)
+    segs = [make_seg(-2, s * half, 2, s * half, net_id=FOREIGN, width=0.2)
+            for s in (1, -1)]
+    segs += [make_seg(s * half, -2, s * half, 2, net_id=FOREIGN, width=0.2)
+             for s in (1, -1)]
+    bi = BoardInfo(layers={}, board_bounds=(-5, -5, 5, 5),
+                   copper_layers=list(LAYERS))
+    return pad, make_pcb(segments=segs, board_info=bi, pads_by_net={OWN: [pad]},
+                         nets={OWN: Net(OWN, '/OWN'), FOREIGN: Net(FOREIGN, '/F')})
+
+
+def in_pad(half, foreign_class):
+    from single_ended_routing import _place_shrunk_via_in_pad
+    pad, pcb = boxed_pad(half)
+    r = _place_shrunk_via_in_pad(pad, None, cfg(foreign_class=foreign_class),
+                                 pcb, OWN, GridCoord(0.05), LAYERS)
+    return None if r is None else (round(r[0].size, 3), round(r[0].drill, 3))
 
 
 def policy(esc):
@@ -127,6 +155,21 @@ def main():
         r5 = _unblock_via_refit(board(0.39), OWN, 0.0, 0.0, (0.5, 0.2), cfg())
         ok('5. fab refit: the 0.45/0.2 ships (completion first)',
            r5 == (0.45, 0.2), r5)
+
+        # copper edge 0.41: the class-0.15 0.5 needs 0.40 + grid, the 0.45
+        # 0.375, its hole 0.35
+        policy('board')
+        r6 = in_pad(0.51, 0.15)
+        ok('6. board via-in-pad, class 0.15 box: the 0.45/0.2 drops',
+           r6 == (0.45, 0.2), r6)
+        # board-clearance boxes around the 0.45/0.2's hole limit (copper edge
+        # 0.34..0.37 off the centre): a 0.45/0.2 ships only where its hole
+        # edge holds 0.25 (half - 0.1 track - 0.1 drill radius)
+        r7 = {h: in_pad(h, 0.1) for h in (0.44, 0.45, 0.46, 0.47)}
+        bad = [h for h, r in r7.items()
+               if r == (0.45, 0.2) and h - 0.2 < 0.25 - 1e-9]
+        ok('7. board via-in-pad: no 0.45/0.2 inside the hole clearance',
+           not bad and r7[0.45] == (0.45, 0.2), r7)
     finally:
         fab_tiers.set_via_hole_clearance(None, None)
         fab_tiers.set_escalation_policy(saved_esc, {})
