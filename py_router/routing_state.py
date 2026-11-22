@@ -165,6 +165,8 @@ class RoutingState:
     # Layer swap tracking
     all_segment_modifications: List = field(default_factory=list)
     all_swap_vias: List = field(default_factory=list)
+    # The writer's second segment source (swap connectors, fine-escape stubs).
+    all_swap_segments: List = field(default_factory=list)
     pad_swaps: List[Dict] = field(default_factory=list)
 
     # Tap-relocation custody (#508 finding 3): a COMMITTED relocation removes
@@ -238,6 +240,7 @@ def create_routing_state(
     single_ended_target_swap_info: Optional[List[Dict]] = None,
     all_segment_modifications: Optional[List] = None,
     all_swap_vias: Optional[List] = None,
+    all_swap_segments: Optional[List] = None,
     total_layer_swaps: int = 0,
     net_obstacles_cache: Optional[Dict] = None,
     working_obstacles: Any = None,
@@ -278,6 +281,8 @@ def create_routing_state(
         all_segment_modifications=(all_segment_modifications
                                    if all_segment_modifications is not None else []),
         all_swap_vias=all_swap_vias if all_swap_vias is not None else [],
+        all_swap_segments=(all_swap_segments
+                           if all_swap_segments is not None else []),
         total_layer_swaps=total_layer_swaps,
         net_obstacles_cache=(net_obstacles_cache
                              if net_obstacles_cache is not None else {}),

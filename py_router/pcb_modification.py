@@ -2176,7 +2176,7 @@ def _via_support_layers(v, segs, pads, zones, copper_layers):
 
 
 def trim_net_stub_debris(pcb_data: PCBData, net_id: int, result, config,
-                         swap_vias=None, vias_only=False):
+                         swap_vias=None, vias_only=False, swap_segments=None):
     """In-loop stub-debris trim: the moment a net's route COMMITS, prune
     the branches of its own pre-existing stub tree the route left unused
     -- and any via those branches leave DANGLING (same-net copper on <=1
@@ -2238,6 +2238,14 @@ def trim_net_stub_debris(pcb_data: PCBData, net_id: int, result, config,
     verbatim copy of the INPUT file, so it never reaches copper this run
     appended. The list is filtered IN PLACE because the writer holds the same
     list object.
+
+    `swap_segments` is the run's `all_swap_segments` (swap reuse-connectors
+    and fine-escape stubs), the writer's second SEGMENT source, and the same
+    ghost applies: a stub dropped from `pcb_data.segments` alone frees its
+    cells while the writer still emits it. Measured on ecp5-dc-scm with
+    KICAD_FINE_ESCAPE=1: ROT_QSPI_DQ2's unused fine-escape stub was trimmed,
+    ROT_QSPI_DQ3 routed 0.2 mm from its still-written end (2 shorts, 2
+    clearance). Filtered in place for the same reason as `swap_vias`.
     """
     pads = pcb_data.pads_by_net.get(net_id, [])
     if not pads:
@@ -2319,6 +2327,9 @@ def trim_net_stub_debris(pcb_data: PCBData, net_id: int, result, config,
         if segs:
             result['new_segments'] = [s for s in segs
                                       if id(s) not in rm_seg_ids]
+        if swap_segments:
+            swap_segments[:] = [s for s in swap_segments
+                                if id(s) not in rm_seg_ids]
     if rm_via_ids:
         pcb_data.vias = [v for v in pcb_data.vias if id(v) not in rm_via_ids]
         vias = result.get('new_vias')
