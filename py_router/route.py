@@ -4414,6 +4414,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             del net_ids[:]
             del single_ended_nets[:]
 
+    # Fine escape windows: a pad whose legal exit band holds no run-grid line
+    # gets its escape stub routed at the rescue grid before the main pass, as
+    # the net's own copper; the main pass routes on from the stub's end.
+    if env_knobs.FINE_ESCAPE and single_ended_nets:
+        from fine_escape import fine_escape_prepass
+        fine_escape_prepass(pcb_data, config,
+                            [nid for _, nid in single_ended_nets],
+                            all_swap_segments, net_clearances=net_clearances,
+                            verbose=verbose)
+
     # Build base obstacle map once (excludes all nets we're routing)
     all_net_ids_to_route = [nid for _, nid in net_ids]
 
