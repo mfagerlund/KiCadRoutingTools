@@ -7,13 +7,16 @@ Fixture: a two-column part, 0.5 mm pitch, 1.2 x 0.3 mm pads, a centre pad
 that seals the inside; every signal pad goes out to its own round connector
 pad. At 0.25 mm track / 0.2 mm clearance the exit band of an inner pad is its
 centre +-0.025 mm. With the part's pad centres on y = 0.05 mod 0.1 no 0.1 mm
-grid line lies in it: the pad is GRID-BOXED and the 0.1 mm main pass cannot
-leave it. Shifted by 0.05 mm (pad centres on the grid) nothing is boxed.
+grid line lies in it: the pad is GRID-BOXED. Shifted by 0.05 mm (pad centres
+on the grid) a line lies in the band, but the router's conservative pad
+raster (neighbours inflated by hw + clearance plus a half-cell corner buffer)
+blocks it: the pad is MAP-BOXED. Either way the 0.1 mm main pass cannot leave
+the pad; detection follows the run grid's own raster.
 
 Checks:
-  1. detection: 8 grid-boxed pads off-grid (the 4 inner pads of each
-     column), 0 on-grid;
-  2. routing off-grid: without the pre-pass the main pass fails the 8
+  1. detection: 8 boxed pads (the 4 inner pads of each column), off-grid
+     and on-grid;
+  2. routing, off-grid and on-grid: without the pre-pass the main pass fails the 8
      boxed nets (the fine-grid rescue recovers them later); with it the main
      pass routes all 12 and no net reaches the rescue. Every net connects
      either way.
@@ -94,7 +97,7 @@ def check_detection(d):
     from kicad_parser import parse_kicad_pcb
     from fine_escape import find_grid_boxed_pads
     errs = []
-    for name, off, want in (('off.kicad_pcb', 0.0, 8), ('on.kicad_pcb', 0.05, 0)):
+    for name, off, want in (('off.kicad_pcb', 0.0, 8), ('on.kicad_pcb', 0.05, 8)):
         pcb = parse_kicad_pcb(_write(d, name, off))
         ids = [nid for nid, n in pcb.nets.items() if n.name.startswith('S')]
         got = find_grid_boxed_pads(pcb, _config(), ids)
@@ -119,17 +122,18 @@ def _connected(path):
     return n
 
 
-def check_routing(d):
+def check_routing(d, y_off):
     import env_knobs
     import route
-    src = _write(d, 'route.kicad_pcb', 0.0)
+    tag = 'off' if y_off == 0 else 'on'
+    src = _write(d, f'route_{tag}.kicad_pcb', y_off)
     names = [f'S{i}' for i in range(1, 2 * ROWS + 1)]
     got = {}
     saved = env_knobs.FINE_ESCAPE
     try:
         for on in (False, True):
             env_knobs.FINE_ESCAPE = on
-            out = os.path.join(d, f'out{int(on)}.kicad_pcb')
+            out = os.path.join(d, f'out_{tag}{int(on)}.kicad_pcb')
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 route.batch_route(src, out, names, layers=['F.Cu', 'B.Cu'],
@@ -141,17 +145,17 @@ def check_routing(d):
     finally:
         env_knobs.FINE_ESCAPE = saved
     for on in (False, True):
-        print(f"  pre-pass {'on ' if on else 'off'}: main pass failed "
+        print(f"  {tag}-grid, pre-pass {'on ' if on else 'off'}: main pass failed "
               f"{got[on][0]}, connected {got[on][1]}/{len(names)}")
     errs = []
     if got[False][0] != 8:
-        errs.append(f"routing: main pass failed {got[False][0]} without the "
+        errs.append(f"routing {tag}: main pass failed {got[False][0]} without the "
                     "pre-pass, want 8 (fixture no longer grid-boxed)")
     if got[True][0] != 0:
-        errs.append(f"routing: main pass failed {got[True][0]} with the pre-pass")
+        errs.append(f"routing {tag}: main pass failed {got[True][0]} with the pre-pass")
     for on in (False, True):
         if got[on][1] != len(names):
-            errs.append(f"routing: {got[on][1]}/{len(names)} connected "
+            errs.append(f"routing {tag}: {got[on][1]}/{len(names)} connected "
                         f"(pre-pass {'on' if on else 'off'})")
     return errs
 
@@ -159,7 +163,7 @@ def check_routing(d):
 def main():
     d = tempfile.mkdtemp(prefix='t2030_')
     try:
-        errs = check_detection(d) + check_routing(d)
+        errs = check_detection(d) + check_routing(d, 0.0) + check_routing(d, 0.05)
     finally:
         shutil.rmtree(d, ignore_errors=True)
     for e in errs:

@@ -41,6 +41,55 @@ def _has_line(lo, hi, step):
     return k * step <= hi + 1e-9
 
 
+def _pad_cells(q, margin, grid):
+    from routing_utils import pad_blocked_cells_array
+    gx, gy = round(q.global_x / grid), round(q.global_y / grid)
+    hw, hh = q.size_x / 2, q.size_y / 2
+    if q.shape in ('circle', 'oval'):
+        cr = min(hw, hh)
+    elif q.shape == 'roundrect':
+        cr = getattr(q, 'roundrect_rratio', 0.25) * min(q.size_x, q.size_y)
+    else:
+        cr = 0
+    return pad_blocked_cells_array(
+        gx, gy, hw, hh, margin, grid, cr,
+        off_x=q.global_x - gx * grid, off_y=q.global_y - gy * grid,
+        rotation_deg=getattr(q, 'rect_rotation', 0.0) or 0.0)
+
+
+def _raster_boxed(p, pads, layer, margin, grid, reach):
+    """True when the run-grid raster (the router's own conservative pad
+    rasteriser, other-net pads of the footprint inflated by hw + clearance)
+    leaves no 8-connected path from the pad's centre cell to `reach` mm away:
+    a grid line sits in the legal band but the raster blocks it."""
+    blocked = set()
+    for q in pads:
+        if q is p or q.net_id == p.net_id or (layer not in q.layers
+                                              and '*.Cu' not in q.layers):
+            continue
+        if abs(q.global_x - p.global_x) > reach + 2 or                 abs(q.global_y - p.global_y) > reach + 2:
+            continue
+        blocked.update(map(tuple, _pad_cells(q, margin, grid).tolist()))
+    c0 = (round(p.global_x / grid), round(p.global_y / grid))
+    seeds = [c for c in map(tuple, _pad_cells(p, 0.0, grid).tolist())
+             if c not in blocked]
+    if not seeds:
+        return True
+    r = int(math.ceil(reach / grid))
+    seen, stack = set(seeds), list(seeds)
+    while stack:
+        x, y = stack.pop()
+        if abs(x - c0[0]) >= r or abs(y - c0[1]) >= r:
+            return False
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                n = (x + dx, y + dy)
+                if n not in seen and n not in blocked:
+                    seen.add(n)
+                    stack.append(n)
+    return True
+
+
 def find_grid_boxed_pads(pcb_data, config, net_ids):
     """Grid-boxed pads of the nets in `net_ids`.
 
@@ -107,7 +156,11 @@ def find_grid_boxed_pads(pcb_data, config, net_ids):
                     lo = max(lo, qp + qhp + clr + hw)
                 far = qa + sgn * qha
                 end = max(end, far) if sgn > 0 else min(end, far)
-            if lo > hi + 1e-9 or _has_line(lo, hi, grid):
+            if lo > hi + 1e-9:
+                continue
+            if _has_line(lo, hi, grid) and not _raster_boxed(
+                    p, pads, layer, hw + clr, grid,
+                    half_a + WINDOW_PITCHES * pitch):
                 continue
             out.append(dict(pad=p, layer=layer, horiz=horiz, sgn=sgn, lo=lo,
                             hi=hi, pitch=pitch, end=end, hw=hw, clr=clr))
