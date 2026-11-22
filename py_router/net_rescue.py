@@ -638,7 +638,10 @@ def _rescue_rungs(config, fine_grid, pcb_data, net_id):
     n_layers = len(pcb_data.board_info.copper_layers) or 2
     # escalation_rungs: empty under --escalation off, raised to the board's
     # own minimums under board (#857) and to this net's rule minimums (#530).
-    _ladder = escalation_rungs(n_layers, extra_floors=config.rule_floors(net_id))
+    # Ring-short rungs are offered too: each rung routes on a map built at its
+    # own via, whose via_hole_extra keeps foreign copper off the hole.
+    _ladder = escalation_rungs(n_layers, extra_floors=config.rule_floors(net_id),
+                               hole_ring_by_keepout=True)
     # Smaller than the via this NET draws (its own #530 via, else the run's).
     _own_via = config.net_via(net_id)[0]
     for floor in _ladder:
@@ -2150,8 +2153,10 @@ def _size_escalation_ladder(config, pcb_data, net_id):
 
     n_layers = len(pcb_data.board_info.copper_layers) or 2
     # escalation_rungs: raised to the board's own minimums under board (#857)
-    # and to this net's rule minimums (#530).
-    ladder = escalation_rungs(n_layers, extra_floors=config.rule_floors(net_id))
+    # and to this net's rule minimums (#530). Ring-short rungs too: the rung
+    # map is built at the rung's via, so via_hole_extra holds the hole.
+    ladder = escalation_rungs(n_layers, extra_floors=config.rule_floors(net_id),
+                              hole_ring_by_keepout=True)
     # Smaller than the via this NET draws (its own #530 via, else the run's).
     own_via = config.net_via(net_id)
     via_rungs = [(f['via_diameter'], f['via_drill']) for f in ladder

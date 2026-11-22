@@ -32,6 +32,8 @@ Checks (clearance 0.1, hole clearance 0.25, standard tier, 4 layers):
      0.45/0.2 drops where the 0.5/0.2 does not fit;
   7. the same, boxed by board-clearance tracks around the 0.45/0.2's hole
      limit: it ships only where its hole holds the hole clearance.
+  8. net rescue under board offers the 0.45/0.2 rung, and every such rung
+     keeps its hole clear by keep-out (via_hole_extra > 0).
 
     python3 tests/test_2018_ring_short_by_keepout.py
 """
@@ -170,6 +172,18 @@ def main():
                if r == (0.45, 0.2) and h - 0.2 < 0.25 - 1e-9]
         ok('7. board via-in-pad: no 0.45/0.2 inside the hole clearance',
            not bad and r7[0.45] == (0.45, 0.2), r7)
+        # net rescue routes each rung on a map built at the rung's via, so a
+        # ring-short rung there holds its hole by keep-out (via_hole_extra)
+        import net_rescue
+        policy('board')
+        rp = board(1.0)
+        rungs = (list(net_rescue._rescue_rungs(cfg(), 0.025, rp, OWN))
+                 + list(net_rescue._size_escalation_ladder(cfg(), rp, OWN)))
+        small = [r for r in rungs if round(r.via_size, 3) == 0.45]
+        ok('8. board net rescue: offers 0.45/0.2, hole held by keep-out',
+           small and all(r.via_hole_extra(0.1) > 0 for r in small),
+           [(round(r.via_size, 3), round(r.via_hole_extra(0.1), 4))
+            for r in rungs])
     finally:
         fab_tiers.set_via_hole_clearance(None, None)
         fab_tiers.set_escalation_policy(saved_esc, {})
