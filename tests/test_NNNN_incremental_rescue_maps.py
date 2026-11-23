@@ -22,7 +22,8 @@ vias, several failed nets asked for at two copper epochs):
   2. at most one whole-board build serves all nets at the first epoch, and
      none at the second (the base is carried over, not rebuilt);
   3. KICAD_NET_MAP_VERIFY=1 runs the same requests with every derived map
-     and every carried base checked against a fresh build, without a raise.
+     and every carried base checked against a fresh build, without a raise;
+  4. a board with scoped .kicad_dru clearance rules is never derived.
 
     python3 tests/test_NNNN_incremental_rescue_maps.py
 """
@@ -134,6 +135,14 @@ except AssertionError as exc:
     ok('verify 3: no derived map or carried base differs from a fresh build', False, str(exc))
 finally:
     env_knobs.NET_MAP_VERIFY = False
+
+# 4. A board with scoped .kicad_dru rules (#1491) is built in full: those
+# rules are installed for the routed net set, so a no-net base would price
+# foreign copper differently from a build for [net].
+_cfg = GridRouteConfig(layers=list(LAYERS))
+_cfg.scoped_clearance = object()
+ok('4: scoped clearance rules make the delta ineligible',
+   not obstacle_map.incremental_net_eligible(board(), _cfg))
 
 print(f'\n{len(fails)} failure(s)' if fails else '\nall passed')
 sys.exit(1 if fails else 0)

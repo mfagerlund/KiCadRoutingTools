@@ -460,63 +460,6 @@ def _closest_pair(points_a, points_b):
     return best
 
 
-# Diagnostics (KRT_RESCUE_MAP_STATS=1): counts every rescue-map request and
-# classifies each miss by what differs from the cached entries.
-RESCUE_MAP_STATS = ({'requests': 0, 'hits': 0, 'builds': 0, 'build_s': 0.0}
-                    if os.environ.get('KRT_RESCUE_MAP_STATS') else None)
-
-
-def _copper_fingerprint(pcb):
-    return hash((tuple(sorted((s.net_id, s.layer, s.start_x, s.start_y, s.end_x, s.end_y, s.width)
-                              for s in pcb.segments)),
-                 tuple(sorted((v.net_id, v.x, v.y, v.size, v.drill) for v in pcb.vias))))
-
-
-def _note_map_request(parent_pcb, cache, key, hit):
-    st = RESCUE_MAP_STATS
-    st['requests'] += 1
-    if hit:
-        st['hits'] += 1
-        return
-    st['builds'] += 1
-    net_id, scope, epoch = key[0], key[1], key[2]
-    geom = key[3:]
-    kind = 'miss_' + str(scope[0])
-    st[kind] = st.get(kind, 0) + 1
-    # Ever seen (scope, geometry) at this copper content? Separates "same copper,
-    # other net" from "copper really changed" from "epoch bumped, copper equal".
-    fp = _copper_fingerprint(parent_pcb)
-    seen = parent_pcb.__dict__.setdefault('_rescue_map_seen', {})
-    prev = seen.get((scope, geom))
-    if prev is None:
-        why = 'first'
-    elif prev[1] == fp:
-        why = 'same_copper_other_net' if prev[0] != net_id else 'same_copper_same_net_epoch_bump'
-    else:
-        why = 'copper_changed_same_net' if prev[0] == net_id else 'copper_changed_other_net'
-    seen[(scope, geom)] = (net_id, fp)
-    st['why_' + why] = st.get('why_' + why, 0) + 1
-    nets = st.setdefault('_nets', set())
-    nets.add(net_id)
-    st['distinct_nets'] = len(nets)
-    geoms = st.setdefault('_geoms', set())
-    geoms.add((scope, geom))
-    st['distinct_scope_geoms'] = len(geoms)
-
-
-def dump_rescue_map_stats():
-    if RESCUE_MAP_STATS is None:
-        return
-    out = {k: (round(v, 2) if isinstance(v, float) else v)
-           for k, v in sorted(RESCUE_MAP_STATS.items()) if not k.startswith('_')}
-    print('RESCUE_MAP_STATS ' + repr(out), flush=True)
-
-
-if RESCUE_MAP_STATS is not None:
-    import atexit
-    atexit.register(dump_rescue_map_stats)
-
-
 def _delta_rescue_map(pcb, cfg, net_id, net_clearances, key):
     """A board-global rescue map for `net_id` derived from a shared no-net base
     (`incremental_net_map`), or None where it cannot be: the escalation and the
@@ -546,8 +489,6 @@ def _delta_rescue_map(pcb, cfg, net_id, net_clearances, key):
                 snap = rebase_no_net_map(base, snap, pcb, cfg, net_clearances=net_clearances,
                                          clearance_floor=floor)
                 entry = cache[bkey] = (base, records, snap, epoch)
-                if RESCUE_MAP_STATS is not None:
-                    RESCUE_MAP_STATS['base_rebases'] = RESCUE_MAP_STATS.get('base_rebases', 0) + 1
             except DeltaIneligible:
                 pass
     if entry is None:
@@ -557,10 +498,10 @@ def _delta_rescue_map(pcb, cfg, net_id, net_clearances, key):
                                            _clearance_floor=floor)
             records = tuple(getattr(pcb, _k, None) for _k in _LIFT_KEYS)
             snap = copper_snapshot(pcb) if not any(records) else None
-            if RESCUE_MAP_STATS is not None:
-                RESCUE_MAP_STATS['base_builds'] = RESCUE_MAP_STATS.get('base_builds', 0) + 1
         entry = cache[bkey] = (base, records, snap, epoch)
-        while len(cache) > 4:
+        # Each base is a whole-board map; two serve an escalation's
+        # consecutive geometries.
+        while len(cache) > 2:
             cache.popitem(last=False)
     else:
         cache.move_to_end(bkey)
@@ -571,13 +512,8 @@ def _delta_rescue_map(pcb, cfg, net_id, net_clearances, key):
         setattr(pcb, _k, _v)
     try:
         out = incremental_net_map(base, pcb, cfg, net_id, net_clearances=net_clearances)
-    except DeltaIneligible as exc:
-        if RESCUE_MAP_STATS is not None:
-            _k = 'delta_ineligible_' + str(exc)
-            RESCUE_MAP_STATS[_k] = RESCUE_MAP_STATS.get(_k, 0) + 1
+    except DeltaIneligible:
         return None
-    if RESCUE_MAP_STATS is not None:
-        RESCUE_MAP_STATS['delta_maps'] = RESCUE_MAP_STATS.get('delta_maps', 0) + 1
     return out
 
 
@@ -633,20 +569,12 @@ def _pristine_rescue_map(board, parent_pcb, cfg, net_id, net_clearances,
            cfg.track_width, cfg.via_size, cfg.via_drill,
            getattr(cfg, 'hole_rules', None) is not None)
     entry = cache.get(key)
-    if RESCUE_MAP_STATS is not None:
-        _note_map_request(parent_pcb, cache, key, entry is not None)
     if entry is None:
-        _t0 = time.perf_counter() if RESCUE_MAP_STATS is not None else 0.0
         pristine = (_delta_rescue_map(board, cfg, net_id, net_clearances,
                                       key[1:]) if board is parent_pcb else None)
         if pristine is None:
             pristine = build_base_obstacle_map(board, cfg, [net_id],
                                                net_clearances=net_clearances)
-        if RESCUE_MAP_STATS is not None:
-            RESCUE_MAP_STATS['build_s'] += time.perf_counter() - _t0
-            RESCUE_MAP_STATS['build_s_' + str(scope_key[0])] = (
-                RESCUE_MAP_STATS.get('build_s_' + str(scope_key[0]), 0.0)
-                + time.perf_counter() - _t0)
         entry = (pristine,
                  (getattr(board, '_graphic_own_pad_lift', None) or {}).get(net_id),
                  (getattr(board, '_graphic_own_pad_via_lift', None) or {}).get(net_id))

@@ -153,6 +153,11 @@ def incremental_net_eligible(pcb_data, config, extra_clearance=0.0,
         return False
     if getattr(config, 'via_span', None) or getattr(config, 'area_clearance', None):
         return False
+    # #1491 scoped .kicad_dru rules are installed for the routed net set
+    # (a rule binds "against a routed net"), so a no-net base prices foreign
+    # copper differently from a build for [net_id].
+    if getattr(config, 'scoped_clearance', None) is not None:
+        return False
     # #530 per-net rungs are sub-builds at their own via geometry, which no
     # single-net delta reproduces. The #568 small rung (slot 1) is never
     # stamped by a build (it keeps its static discipline), so a board whose
