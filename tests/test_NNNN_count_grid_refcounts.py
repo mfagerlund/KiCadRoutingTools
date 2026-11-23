@@ -180,7 +180,7 @@ def add_only_ops(m, model, rng, n):
 
 # content_digest of the seed-1 map below, recorded on the hash-map store
 # (FxHashMap<u64, u16> refcounts) before the tiled grid replaced it.
-PINNED_DIGEST = None
+PINNED_DIGEST = 0xfee9d7d98801e1c7
 
 
 def build_pair(seed):
