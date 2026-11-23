@@ -110,7 +110,10 @@ def main():
         r = run_check([sys.executable, '-B', '-X', 'utf8', tool('route.py'), qfn, out,
                        '--nets', 'N*', '--track-width', '0.1', '--clearance', '0.28',
                        '--grid-step', '0.1', '--via-size', '0.3', '--via-drill', '0.15'],
-                      accept=True)
+                      accept=True,
+                      # the main pass must stay boxed in: the fine-escape
+                      # pre-pass would route these pads before it (#2030)
+                      env=dict(os.environ, KICAD_FINE_ESCAPE='0'))
         log = r.stdout + r.stderr
         line = next((l for l in log.splitlines() if l.startswith('JSON_SUMMARY:')), '')
         summ = json.loads(line.split(':', 1)[1]) if line else {}
