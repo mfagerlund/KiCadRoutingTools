@@ -13,6 +13,9 @@ Checks:
   2. modify_segment_layers writes the new width into the file with the layer.
   3. revert_stub_layer_switch restores layer AND width.
   4. A stub at a width of its own (not the old layer's rule width) keeps it.
+  5. A run-wide --impedance width map (config.layer_widths, no per-net rule)
+     does not re-width: a diff-pair member's width is tied to its gap, and
+     widening it in place ran it into its partner (test_diff_pair_route).
 
     python3 tests/test_NNNN_stub_switch_layer_width.py
 """
@@ -91,6 +94,16 @@ def main():
     info = sls.get_stub_info(pcb, 1, 14, 15, 'In1.Cu')
     sls.apply_stub_layer_switch(pcb, info, 'F.Cu', config(), debug=False)
     check("own width kept", abs(stub.width - 0.2) < 1e-9, f"{stub.width}")
+
+    print("5. a run-wide impedance width map does not re-width")
+    pcb, stub = board(INNER_W)
+    cfg = GridRouteConfig(layers=['F.Cu', 'In1.Cu', 'B.Cu'], clearance=0.2,
+                          track_width=OUTER_W, via_size=0.5, via_drill=0.3)
+    cfg.layer_widths = {'F.Cu': OUTER_W, 'B.Cu': OUTER_W, 'In1.Cu': INNER_W}
+    info = sls.get_stub_info(pcb, 1, 14, 15, 'In1.Cu')
+    sls.apply_stub_layer_switch(pcb, info, 'F.Cu', cfg, debug=False)
+    check("impedance-map stub keeps its width", abs(stub.width - INNER_W) < 1e-9,
+          f"{stub.width}")
 
 
 if __name__ == '__main__':
