@@ -23,7 +23,9 @@ vias, several failed nets asked for at two copper epochs):
      none at the second (the base is carried over, not rebuilt);
   3. KICAD_NET_MAP_VERIFY=1 runs the same requests with every derived map
      and every carried base checked against a fresh build, without a raise;
-  4. a board with scoped .kicad_dru clearance rules is never derived.
+  4. a board with scoped .kicad_dru clearance rules is never derived;
+  5. an escalation walking every net through a full ladder of geometries
+     builds one base per geometry, not one per net and rung.
 
     python3 tests/test_NNNN_incremental_rescue_maps.py
 """
@@ -143,6 +145,24 @@ _cfg = GridRouteConfig(layers=list(LAYERS))
 _cfg.scoped_clearance = object()
 ok('4: scoped clearance rules make the delta ineligible',
    not obstacle_map.incremental_net_eligible(board(), _cfg))
+
+# 5. Terminal escalation walks each net through every rung of its ladder in
+# turn; the base cache must hold the whole ladder or each net evicts the
+# base the next one needs first.
+from dataclasses import replace as _replace  # noqa: E402
+_pcb = board()
+_base = GridRouteConfig(layers=list(LAYERS))
+_ladder = [_replace(_base, track_width=w) for w in (0.2, 0.18, 0.16, 0.14)]
+_real, _counted, _calls = full_build_counter()
+obstacle_map.build_base_obstacle_map = _counted
+try:
+    for _n in range(1, 5):
+        for _cfg in _ladder:
+            net_rescue._pristine_rescue_map(_pcb, _pcb, _cfg, _n, {}, ('full',))
+finally:
+    obstacle_map.build_base_obstacle_map = _real
+ok(f'5: a {len(_ladder)}-rung escalation over 4 nets builds one base per rung',
+   len(_calls) == len(_ladder), f'{len(_calls)} builds')
 
 print(f'\n{len(fails)} failure(s)' if fails else '\nall passed')
 sys.exit(1 if fails else 0)

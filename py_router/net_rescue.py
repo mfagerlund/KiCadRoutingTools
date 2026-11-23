@@ -460,6 +460,11 @@ def _closest_pair(points_a, points_b):
     return best
 
 
+# The longest terminal escalation ladder: up to three size rungs and the
+# #1853 copper-clearance-alone rung (`_escalation_ladder`).
+RESCUE_BASE_LRU = 4
+
+
 def _delta_rescue_map(pcb, cfg, net_id, net_clearances, key):
     """A board-global rescue map for `net_id` derived from a shared no-net base
     (`incremental_net_map`), or None where it cannot be: the escalation and the
@@ -499,9 +504,10 @@ def _delta_rescue_map(pcb, cfg, net_id, net_clearances, key):
             records = tuple(getattr(pcb, _k, None) for _k in _LIFT_KEYS)
             snap = copper_snapshot(pcb) if not any(records) else None
         entry = cache[bkey] = (base, records, snap, epoch)
-        # Each base is a whole-board map; two serve an escalation's
-        # consecutive geometries.
-        while len(cache) > 2:
+        # Each base is a whole-board map. Terminal escalation walks every
+        # net through its whole ladder, so the cache holds one base per rung
+        # or each net evicts the base the next net needs first.
+        while len(cache) > RESCUE_BASE_LRU:
             cache.popitem(last=False)
     else:
         cache.move_to_end(bkey)
