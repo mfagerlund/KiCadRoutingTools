@@ -1347,6 +1347,17 @@ def rescue_candidates(pcb_data, routed_results, single_ended_nets):
     return candidates + restores
 
 
+def escape_track_width(config, net_id, layer, width):
+    """Width for a bare-ball escape track the fanout drew at `width` on `layer`.
+
+    The fanout draws every layer at the run's one track width; a layer-scoped
+    width rule (DRU `(layer inner)` track_width, impedance widths) gives the
+    net its own width on that layer. Only NARROW: a narrower track keeps every
+    clearance the fanout checked at the wider one."""
+    lw = config.get_net_track_width(net_id, layer)
+    return lw if lw < width - 1e-6 else width
+
+
 def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                        progress_callback=None, cancel_check=None):
     """Scoped fine-parameter rescue for every still-failed/partial net.
@@ -1624,7 +1635,9 @@ def rescue_failed_nets(state, single_ended_nets, net_clearances=None,
                         _gsegs = [_Seg(
                             start_x=t['start'][0], start_y=t['start'][1],
                             end_x=t['end'][0], end_y=t['end'][1],
-                            width=t['width'], layer=t['layer'],
+                            width=escape_track_width(config, net_id, t['layer'],
+                                                    t['width']),
+                            layer=t['layer'],
                             net_id=net_id) for t in (_ft or [])
                             if t.get('net_id') == net_id]
                         _gvias = [_Via(

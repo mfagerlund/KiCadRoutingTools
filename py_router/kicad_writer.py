@@ -1530,7 +1530,13 @@ def modify_segment_layers(content: str, segment_mods: List[Dict],
             if layer != new_layer:
                 count += 1
                 # Replace the layer in the match
-                return full_match.replace(f'(layer "{layer}")', f'(layer "{new_layer}")')
+                out = full_match.replace(f'(layer "{layer}")', f'(layer "{new_layer}")')
+                if 'new_width' in mod:
+                    # The switch re-widthed the copper for the new layer's
+                    # width rule; the file must carry that width too.
+                    out = re.sub(r'\(width [-0-9.eE]+\)',
+                                 f"(width {mod['new_width']})", out, count=1)
+                return out
         return full_match
 
     satisfied = set()
