@@ -341,15 +341,18 @@ def apply_stub_layer_switch(pcb_data: PCBData, stub: StubInfo, new_layer: str,
             'old_layer': old_layer,
             'new_layer': new_layer
         })
-        # A layer-scoped width rule (DRU `(layer inner)` track_width, an
-        # impedance declaration) gives the net a different width on the new
-        # layer: a stub routed at the old layer's width must take the new
-        # one, or it ships at a width the rule forbids there. Only copper
-        # drawn at the old layer's width moves to the new width -- a
-        # deliberate neck-down or a wider imported track keeps its own.
-        _ow = config.get_net_track_width(seg.net_id, old_layer)
-        _nw = config.get_net_track_width(seg.net_id, new_layer)
-        if abs(_ow - _nw) > 1e-6 and abs(seg.width - _ow) < 1e-6:
+        # A per-net layer-scoped width rule (DRU `(layer inner)` track_width,
+        # a stored impedance declaration: config.net_layer_widths) gives the
+        # net a different width on the new layer: a stub routed at the old
+        # layer's rule width must take the new one, or it ships at a width
+        # the rule forbids there. Only copper drawn at the old layer's width
+        # moves -- a deliberate neck-down or a wider imported track keeps
+        # its own. The run-wide --impedance map (config.layer_widths) is
+        # left alone: a diff-pair member's width there is tied to its gap,
+        # and widening it in place runs it into its partner.
+        _nlw = (getattr(config, 'net_layer_widths', None) or {}).get(seg.net_id) or {}
+        _ow, _nw = _nlw.get(old_layer), _nlw.get(new_layer)
+        if _ow and _nw and abs(_ow - _nw) > 1e-6 and abs(seg.width - _ow) < 1e-6:
             segment_mods[-1]['old_width'] = seg.width
             segment_mods[-1]['new_width'] = _nw
             seg.width = _nw
