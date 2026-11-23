@@ -392,6 +392,11 @@ class GridRouteConfig:
     # step touches an impedance-routed net without --impedance. Consulted in
     # get_net_track_width above the netclass scalar.
     net_layer_widths: Dict[int, Dict[str, float]] = field(default_factory=dict)
+    # Per-net per-layer track_width rule MINIMUM from the board's .kicad_dru
+    # (only where it exceeds the nominal track_width). A neck-down never
+    # narrows a net below it: KiCad's DRC grades a neck under the rule min
+    # as a track_width error.
+    net_layer_min_widths: Dict[int, Dict[str, float]] = field(default_factory=dict)
     # Obstacle-stamp reserve policy (#156). False (single-ended engine): stamps
     # reserve the NOMINAL track_width around obstacles and every net's extra
     # width (power override OR impedance layer width) rides its own fractional
@@ -1144,6 +1149,11 @@ class GridRouteConfig:
                        + list(self.coplanar_layer_widths.values()),
                        default=self.track_width)
         return self.track_width
+
+    def net_min_track_width(self, net_id: int, layer: str) -> float:
+        """The .kicad_dru track_width minimum for this net on `layer`, or 0.0
+        when no rule sets one above the nominal track width."""
+        return (self.net_layer_min_widths.get(net_id) or {}).get(layer, 0.0)
 
     def get_net_track_width(self, net_id: int, layer: str) -> float:
         """Get track width for a specific net on a specific layer.
