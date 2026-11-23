@@ -4750,6 +4750,22 @@ def _route_main_connection(router, obstacles, config, sources, targets, track_ma
         return result + (False, None)
     span_mm = _edge_span_mm(sources, targets, config.grid_step)
     neck_floor = layer_w if power_wide else config.track_width
+    # A neck never goes under the board's track_width rule minimum on a
+    # layer: per-layer floors, and no neck at all where no layer can go
+    # narrower than the net already is.
+    floors = [max(config.get_track_width(l) if power_wide else config.track_width,
+                  config.net_min_track_width(net_id, l)) for l in config.layers]
+    rule_floor = max([config.net_min_track_width(net_id, l) for l in config.layers] + [0.0])
+    if all(fl >= config.get_net_track_width(net_id, l) - 1e-9
+           for fl, l in zip(floors, config.layers)):
+        return result + (False, None)
+
+    def _floor_margins():
+        if rule_floor <= 0.0:
+            return (config.base_track_margins() if power_wide
+                    else config.track_margins_for_width(config.track_width))
+        return [config._phase_exact_margin(l, fl)
+                for fl, l in zip(floors, config.layers)]
 
     def _pad_entry_neck(prior):
         # #1452: --escalation off refused (or could not use) the ladder.
@@ -4757,8 +4773,7 @@ def _route_main_connection(router, obstacles, config, sources, targets, track_ma
         from fab_tiers import may_narrow
         if may_narrow() or not config.power_tap_neckdown:
             return prior + (False, None)
-        n_margins = (config.base_track_margins() if power_wide
-                     else config.track_margins_for_width(config.track_width))
+        n_margins = _floor_margins()
         path, it = _pad_entry_neck_route(
             router, obstacles, config, sources, targets, track_margin, n_margins,
             pcb_data, net_id, print_prefix, direction_labels, single_direction,
@@ -4800,7 +4815,9 @@ def _route_main_connection(router, obstacles, config, sources, targets, track_ma
     if span_mm <= SHORT_POWER_EDGE_MM:
         # Short edge: step the width down, widest-that-fits wins; segments use it.
         total_iters = result[1]
-        for w in _power_width_ladder(net_w, neck_floor):
+        for w in _power_width_ladder(net_w, max(neck_floor, rule_floor)):
+            if w < rule_floor - 1e-9:
+                continue
             tm = config.track_margins_for_width(w)
             r = _route_connection_at_margin(
                 router, obstacles, config, sources, targets, tm,
@@ -4828,8 +4845,7 @@ def _route_main_connection(router, obstacles, config, sources, targets, track_ma
     # on impedance runs, 0 on plain runs); an impedance net necks to the
     # NOMINAL width (its margins vs the stamps' reserve, usually all-zero).
     print(f"{print_prefix}{YELLOW}Wide route blocked - retrying at default track width (neck-down){RESET}")
-    retry_margins = (config.base_track_margins() if power_wide
-                     else config.track_margins_for_width(config.track_width))
+    retry_margins = _floor_margins()
     retry = _route_connection_at_margin(
         router, obstacles, config, sources, targets, retry_margins,
         pcb_data, net_id, print_prefix, direction_labels, single_direction, waypoints)
@@ -8510,9 +8526,10 @@ def _neck_width_for_net(config: GridRouteConfig, net_id: int, layer: str) -> flo
     exactly as always; an IMPEDANCE-width net (layer width above nominal,
     KICAD_IMPEDANCE_NECKDOWN allow, #465) necks to the NOMINAL track width."""
     lw = config.get_track_width(layer)
+    rule_min = config.net_min_track_width(net_id, layer)
     if config.get_net_track_width(net_id, layer) > lw + 1e-9:
-        return lw
-    return min(lw, config.track_width)
+        return max(lw, rule_min)
+    return max(min(lw, config.track_width), rule_min)
 
 
 # #1033: granularity of the piecewise widen-back. A segment that does not fit

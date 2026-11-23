@@ -3134,6 +3134,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # met unbound names. No file -> no class widths or vias, as for tracks.
     _per_net, _per_layer, _per_net_via = {}, {}, {}
     _per_layer_explicit = {}   # explicit --track-width clamped per layer
+    _rule_min_widths = {}      # .kicad_dru track_width min above nominal
     if input_file and os.path.isfile(input_file):
         try:
             from list_nets import net_track_width_map_by_id, fab_floors
@@ -3196,6 +3197,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     # the window where the rule excludes it (measured: a
                     # 55-ohm class fixed at 0.18 outer / 0.102 inner drew
                     # 0.18 on inner layers, 199 track_width errors).
+                    _nominal_w = float(track_width or 0.0)
+                    for l in _cu:
+                        _c = _dr.resolve_for_copper(
+                            'track_width', _dr.item_for_net(nid, 'track', l), None, l)
+                        if (_c.min_rule is not None and _c.min is not None
+                                and _c.min > _nominal_w + 1e-9):
+                            _rule_min_widths.setdefault(nid, {})[l] = float(_c.min)
                     if not track_width_from_class and impedance is None and _cu:
                         _xl = {}
                         for l in _cu:
@@ -3699,6 +3707,8 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             net_layer_widths_map[_nid] = dict(_bl)
     if net_layer_widths_map:
         config_kwargs['net_layer_widths'] = net_layer_widths_map
+    if _rule_min_widths:
+        config_kwargs['net_layer_min_widths'] = _rule_min_widths
     # #530 decision 4: per-net via geometry -> config.net_via_sizes (the
     # obstacle map grows one via-legality rung per distinct size; a 0.21.x
     # router binary without rung support routes single-rung, announced).
