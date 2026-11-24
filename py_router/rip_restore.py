@@ -303,7 +303,13 @@ def try_terminal_restore(pcb_data: PCBData, config: GridRouteConfig,
     kept_s = [s for s in kept_s if id(s) not in _present_s]
     kept_v = [v for v in kept_v if id(v) not in _present_v]
     if not kept_s and not kept_v:
-        return 'stub'   # already restored by an earlier terminal failure
+        # Already restored by an earlier terminal failure: say so, or a
+        # second ladder failure of the same victim ends with no line naming
+        # what became of it (#1394).
+        name = pcb_data.nets[net_id].name if net_id in pcb_data.nets else str(net_id)
+        print(f"  RIP-RESTORE (#468): {name} remains UNROUTED -- its escape "
+              f"stub is still in place from an earlier restore")
+        return 'stub'
     # Mirror rip_up_net's own cache maintenance (remove entry -> mutate
     # pcb_data -> recompute -> add entry): the restored stubs become map
     # obstacles for every later net this run, the cache entry keeps
