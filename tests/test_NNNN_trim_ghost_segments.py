@@ -9,9 +9,9 @@ escape fanout).
 A stub that lives in `all_swap_segments` and is dropped from `pcb_data` alone
 becomes a ghost: absent from the board model, present in the written file.
 
-Measured on ecp5-dc-scm (stubs placed by an escape pre-pass): ROT_QSPI_DQ2
-routed without its stub, the trim freed it, ROT_QSPI_DQ3 routed 0.2 mm from the
-stub end that was still written (2 shorting_items, 2 clearance).
+Seen with stubs placed by an escape pre-pass: one net routed without its
+stub, the trim freed it, and a neighbour net routed 0.2 mm from the stub end
+that was still written (shorting_items and clearance violations).
 
 The test asserts the invariant, with its own negative control: without the
 swap list handed over the ghost must appear.
