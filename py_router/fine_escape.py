@@ -197,7 +197,9 @@ def _targets(b, grid):
     return pts
 
 
-def _route_stub(pcb_data, b, config, net_clearances):
+def _route_stub(pcb_data, b, config, net_clearances, grid=None):
+    """The escape stub of one pad inside its window, at `grid` (the rescue
+    grid by default). None when it does not route."""
     from net_rescue import _pristine_rescue_map, _fence_window, seed_rows
     from net_rescue import _result_escapes_window
     from plane_pad_tap import make_local_window
@@ -210,11 +212,13 @@ def _route_stub(pcb_data, b, config, net_clearances):
     ys = [p.global_y] + [t[1] for t in tgt_pts]
     cx, cy = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
     half = max(max(xs) - min(xs), max(ys) - min(ys)) / 2 + 2 * b['pitch']
-    cfg = replace(config, grid_step=defaults.RESCUE_GRID_STEP,
+    grid = grid or defaults.RESCUE_GRID_STEP
+    cfg = replace(config, grid_step=grid,
                   layers=[b['layer']], bga_exclusion_zones=[])
     window = make_local_window(pcb_data, cx, cy, half)
     obstacles = _pristine_rescue_map(window, pcb_data, cfg, p.net_id,
-                                     net_clearances, ('fine-escape', cx, cy, half))
+                                     net_clearances,
+                                     ('fine-escape', cx, cy, half, grid))
     _fence_window(obstacles, window, cfg)
     src = seed_rows([(p.global_x, p.global_y, b['layer'])], cfg, window)
     tgt = seed_rows(tgt_pts, cfg, window)
@@ -244,10 +248,18 @@ def fine_escape_prepass(pcb_data, config, net_ids, all_swap_segments,
     from pcb_modification import bump_copper_epoch
 
     boxed = find_grid_boxed_pads(pcb_data, config, net_ids)
-    placed = 0
+    placed = escapable = 0
     for b in boxed:
         p = b['pad']
         if _has_own_copper(pcb_data, p):
+            continue
+        # The geometric test is conservative: the main pass has more ways out
+        # of a pad than a straight exit. A pad the run's own grid escapes in
+        # the same window is not boxed and gets no stub: a stub there only
+        # pins the exit and costs the main pass search.
+        if _route_stub(pcb_data, b, config, net_clearances,
+                       grid=config.grid_step) is not None:
+            escapable += 1
             continue
         result = _route_stub(pcb_data, b, config, net_clearances)
         if result is None:
@@ -263,5 +275,5 @@ def fine_escape_prepass(pcb_data, config, net_ids, all_swap_segments,
             all_swap_segments.append(seg)
         bump_copper_epoch(pcb_data)
         placed += 1
-    print(f"Fine escape: {len(boxed)} grid-boxed pad(s), {placed} stub(s) placed")
-    return len(boxed), placed
+    print(f"Fine escape: {len(boxed) - escapable} grid-boxed pad(s), {placed} stub(s) placed")
+    return len(boxed) - escapable, placed
