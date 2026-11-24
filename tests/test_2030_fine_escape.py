@@ -20,6 +20,13 @@ Checks:
      boxed nets (the fine-grid rescue recovers them later); with it the main
      pass routes all 12 and no net reaches the rescue. Every net connects
      either way.
+  3. a pad of ANOTHER footprint continuing the row past an end pad boxes
+     that end pad too (9): boxedness is decided against all copper and
+     pads around the pad, not against its own footprint's row;
+  4. the stubs belong to their net's routing: the pre-pass reserves them as
+     the net's copper; a failed route keeps the reservation, a successful
+     one takes the stubs into its new_segments (and off the board as loose
+     copper); `release` leaves no stub of an unrouted net on the board.
 """
 import contextlib
 import io
@@ -52,7 +59,7 @@ def _fp(ref, x, y, pads):
             + ''.join(pads) + '\t)\n')
 
 
-def board_text(y_off):
+def board_text(y_off, foreign=False):
     nets = ['(net 0 "")', '(net 1 "GND")']
     u1, j1, j2 = [], [], []
     u1.append(_pad('EP', 0, 0, 2.4, 3.6, 1, 'GND', 'rect'))
@@ -69,6 +76,10 @@ def board_text(y_off):
             nid += 1
     body = (_fp('U1', 110, 110 + y_off, u1) + _fp('J1', 103, 110, j1)
             + _fp('J2', 117, 110, j2))
+    if foreign:  # another net's pad, own footprint, one pitch past S1
+        nets.append(f'(net {nid} "X1")')
+        body += _fp('R1', 108, 110 + y_off - (ROWS + 1) * PITCH / 2,
+                    [_pad('1', 0, 0, 1.2, 0.3, nid, 'X1')])
     return ('(kicad_pcb\n\t(version 20241229)\n\t(generator "test_2030")\n'
             '\t(general\n\t\t(thickness 1.6)\n\t)\n'
             '\t(layers\n\t\t(0 "F.Cu" signal)\n\t\t(31 "B.Cu" signal)\n'
@@ -79,10 +90,10 @@ def board_text(y_off):
             '\t\t(layer "Edge.Cuts")\n\t)\n)\n')
 
 
-def _write(d, name, y_off):
+def _write(d, name, y_off, foreign=False):
     p = os.path.join(d, name)
     with open(p, 'w', encoding='utf-8') as f:
-        f.write(board_text(y_off))
+        f.write(board_text(y_off, foreign))
     return evidence(p)
 
 
@@ -104,6 +115,52 @@ def check_detection(d):
         print(f"  {name}: {len(got)} grid-boxed pad(s), want {want}")
         if len(got) != want:
             errs.append(f"detection {name}: {len(got)} grid-boxed, want {want}")
+    return errs
+
+
+def check_foreign_neighbour(d):
+    from kicad_parser import parse_kicad_pcb
+    from fine_escape import find_grid_boxed_pads
+    pcb = parse_kicad_pcb(_write(d, 'foreign.kicad_pcb', 0.0, foreign=True))
+    ids = [nid for nid, n in pcb.nets.items() if n.name.startswith('S')]
+    got = find_grid_boxed_pads(pcb, _config(), ids)
+    names = sorted(b['pad'].net_name for b in got)
+    print(f"  foreign neighbour: {len(got)} grid-boxed pad(s), want 9")
+    if len(got) != 9 or 'S1' not in names:
+        return [f"foreign neighbour: boxed {names}, want the 8 inner pads and S1"]
+    return []
+
+
+def check_reservation(d):
+    from kicad_parser import parse_kicad_pcb
+    import fine_escape as fe
+    pcb = parse_kicad_pcb(_write(d, 'resv.kicad_pcb', 0.0))
+    cfg = _config()
+    ids = [nid for nid, n in pcb.nets.items() if n.name.startswith('S')]
+    errs = []
+    with contextlib.redirect_stdout(io.StringIO()):
+        nres = fe.fine_escape_prepass(pcb, cfg, ids)
+    st = getattr(pcb, fe._STATE)
+    on_board = lambda segs: sum(any(s is t for t in pcb.segments) for s in segs)
+    if nres != 8 or any(on_board(v) != len(v) for v in st.pending.values()):
+        errs.append(f"reservation: {nres} net(s) reserved, want 8, all on the board")
+    a, b = sorted(st.pending)[:2]
+    sa = list(st.pending[a])
+    tok = fe.begin(pcb, a, cfg)
+    fe.finish(pcb, tok, {'failed': True})
+    if st.pending.get(a) != sa or on_board(sa) != len(sa):
+        errs.append("reservation: a failed route dropped the net's reserved stubs")
+    tok = fe.begin(pcb, a, cfg)
+    res = fe.finish(pcb, tok, {'new_segments': [], 'new_vias': []})
+    if a in st.pending or on_board(sa) or res['new_segments'] != sa:
+        errs.append("reservation: a successful route did not take its stubs")
+    with contextlib.redirect_stdout(io.StringIO()):
+        fe.release(pcb)
+    left = [s for s in pcb.segments if s.net_id in ids]
+    if st.pending or left:
+        errs.append(f"reservation: {len(left)} stub segment(s) left after release")
+    print(f"  reservation: 8 nets reserved; fail keeps, success takes, "
+          f"release clears: {'ok' if not errs else 'NO'}")
     return errs
 
 
@@ -163,7 +220,9 @@ def check_routing(d, y_off):
 def main():
     d = tempfile.mkdtemp(prefix='t2030_')
     try:
-        errs = check_detection(d) + check_routing(d, 0.0) + check_routing(d, 0.05)
+        errs = (check_detection(d) + check_foreign_neighbour(d)
+                + check_reservation(d) + check_routing(d, 0.0)
+                + check_routing(d, 0.05))
     finally:
         shutil.rmtree(d, ignore_errors=True)
     for e in errs:

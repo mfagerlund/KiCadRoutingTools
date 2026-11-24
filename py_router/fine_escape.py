@@ -6,24 +6,39 @@ clearance the band is 0.05 mm wide, and when it sits between two 0.1 mm grid
 lines the main pass cannot leave the pad at all, however long it searches.
 The A* spends its whole budget on the net and the net ends unrouted.
 
-Before the main pass, this pre-pass finds such GRID-BOXED pads (the band is
-non-empty, but no multiple of grid_step falls in it), routes only the escape
-stub of each one at the rescue grid inside a small window around the pad, on
-the pad's own layer, ending on a node of the run's grid just past the row,
-and commits the stub as the net's own copper. The main pass then routes from
-the stub's end at the run's grid, unchanged.
+A pad is GRID-BOXED when the run grid's own raster -- every other-net pad
+within reach, from any footprint, inflated by half width + clearance, plus
+every other-net track and via on the board at that moment -- leaves no
+8-connected path from the pad to a cell `reach` away, in any direction. For
+such a pad an escape stub is routed at the rescue grid inside a small window
+around the pad, on the pad's own layer, ending on a node of the run's grid
+just past the row (outward, away from the footprint centre); the route then
+continues from the stub's end at the run's grid.
 
-Stubs are routed in a fixed order (by footprint, then pad), each against the
-copper of the stubs before it. A stub that does not route leaves the pad as
-it was: the main pass then sees exactly what it saw without this pass.
+The stub belongs to its net's routing. `fine_escape_prepass` runs before
+the obstacle maps are built and reserves the stubs of the pads boxed on the
+clean board: they go into pcb_data as copper of their (unrouted) net, so
+every other net routes around the exit. Every routing site brackets its
+route with `begin` / `finish`. `begin` adopts the net's reserved stubs, or
+when there are none (the net was ripped, or routes again later) decides
+boxedness against the copper present at that moment and lays fresh ones.
+`finish` hands the stubs of a successful route to the front of its
+new_segments: from there they are the net's routed copper, committed,
+recorded and ripped with it. A failed route keeps a reservation and drops
+fresh stubs. `release` takes the reservations of nets that never routed off
+the board after the routing passes, so no stub ships unconnected.
 """
 import math
 from dataclasses import replace
+
+import numpy as np
 
 import routing_defaults as defaults
 
 # Window reach past the footprint edge, in pitches.
 WINDOW_PITCHES = 3
+
+_STATE = '_fine_escape_state'
 
 
 def _half_extents(pad):
@@ -36,9 +51,8 @@ def _half_extents(pad):
     return hx, hy
 
 
-def _has_line(lo, hi, step):
-    k = math.ceil(lo / step - 1e-9)
-    return k * step <= hi + 1e-9
+def _on_layer(q, layer):
+    return layer in q.layers or '*.Cu' in q.layers
 
 
 def _pad_cells(q, margin, grid):
@@ -57,41 +71,97 @@ def _pad_cells(q, margin, grid):
         rotation_deg=getattr(q, 'rect_rotation', 0.0) or 0.0)
 
 
-def _raster_boxed(p, pads, layer, margin, grid, reach):
-    """True when the run-grid raster (the router's own conservative pad
-    rasteriser, other-net pads of the footprint inflated by hw + clearance)
-    leaves no 8-connected path from the pad's centre cell to `reach` mm away:
-    a grid line sits in the legal band but the raster blocks it."""
-    blocked = set()
-    for q in pads:
-        if q is p or q.net_id == p.net_id or (layer not in q.layers
-                                              and '*.Cu' not in q.layers):
+def _all_pads(pcb_data):
+    return [p for plist in pcb_data.pads_by_net.values() for p in plist]
+
+
+def _raster_boxed(pcb_data, p, layer, margin, grid, reach, pads=None):
+    """True when the run-grid raster leaves no 8-connected path from the
+    pad's cells to `reach` mm away. Obstacles: every other-net pad on the
+    layer within reach (the router's own conservative pad rasteriser,
+    inflated by `margin` = half width + clearance) and every other-net track
+    on the layer and via, inflated the same way."""
+    r = int(math.ceil(reach / grid))
+    cx0, cy0 = round(p.global_x / grid), round(p.global_y / grid)
+    n = 2 * r + 1
+    blocked = np.zeros((n, n), dtype=bool)
+
+    def mark(cells, arr):
+        if len(cells) == 0:
+            return
+        c = np.asarray(cells)
+        i, j = c[:, 0] - cx0 + r, c[:, 1] - cy0 + r
+        ok = (i >= 0) & (i < n) & (j >= 0) & (j < n)
+        arr[i[ok], j[ok]] = True
+
+    span = reach + 2
+    for q in (pads if pads is not None else _all_pads(pcb_data)):
+        if q is p or q.net_id == p.net_id or not _on_layer(q, layer):
             continue
-        if abs(q.global_x - p.global_x) > reach + 2 or                 abs(q.global_y - p.global_y) > reach + 2:
+        if abs(q.global_x - p.global_x) > span or abs(q.global_y - p.global_y) > span:
             continue
-        blocked.update(map(tuple, _pad_cells(q, margin, grid).tolist()))
-    c0 = (round(p.global_x / grid), round(p.global_y / grid))
-    seeds = [c for c in map(tuple, _pad_cells(p, 0.0, grid).tolist())
-             if c not in blocked]
+        mark(_pad_cells(q, margin, grid), blocked)
+
+    xs = (cx0 - r + np.arange(n)) * grid
+    ys = (cy0 - r + np.arange(n)) * grid
+    X, Y = np.meshgrid(xs, ys, indexing='ij')
+    x0, x1, y0, y1 = xs[0], xs[-1], ys[0], ys[-1]
+    for s in pcb_data.segments:
+        if s.net_id == p.net_id or s.layer != layer:
+            continue
+        lim = margin + s.width / 2
+        if (max(s.start_x, s.end_x) < x0 - lim or min(s.start_x, s.end_x) > x1 + lim
+                or max(s.start_y, s.end_y) < y0 - lim
+                or min(s.start_y, s.end_y) > y1 + lim):
+            continue
+        dx, dy = s.end_x - s.start_x, s.end_y - s.start_y
+        L2 = dx * dx + dy * dy
+        if L2 > 0:
+            t = np.clip(((X - s.start_x) * dx + (Y - s.start_y) * dy) / L2, 0, 1)
+        else:
+            t = 0.0
+        d2 = (X - s.start_x - t * dx) ** 2 + (Y - s.start_y - t * dy) ** 2
+        blocked |= d2 < lim * lim
+    for v in pcb_data.vias:
+        if v.net_id == p.net_id:
+            continue
+        lim = margin + v.size / 2
+        if v.x < x0 - lim or v.x > x1 + lim or v.y < y0 - lim or v.y > y1 + lim:
+            continue
+        blocked |= (X - v.x) ** 2 + (Y - v.y) ** 2 < lim * lim
+
+    own = np.zeros((n, n), dtype=bool)
+    mark(_pad_cells(p, 0.0, grid), own)
+    seeds = list(zip(*np.nonzero(own & ~blocked)))
     if not seeds:
         return True
-    r = int(math.ceil(reach / grid))
-    seen, stack = set(seeds), list(seeds)
+    seen = blocked.copy()
+    for c in seeds:
+        seen[c] = True
+    stack = seeds
     while stack:
-        x, y = stack.pop()
-        if abs(x - c0[0]) >= r or abs(y - c0[1]) >= r:
+        i, j = stack.pop()
+        if i == 0 or j == 0 or i == n - 1 or j == n - 1:
             return False
-        for dx in (-1, 0, 1):
-            for dy in (-1, 0, 1):
-                n = (x + dx, y + dy)
-                if n not in seen and n not in blocked:
-                    seen.add(n)
-                    stack.append(n)
+        for di in (-1, 0, 1):
+            for dj in (-1, 0, 1):
+                a, b = i + di, j + dj
+                if not seen[a, b]:
+                    seen[a, b] = True
+                    stack.append((a, b))
     return True
 
 
-def find_grid_boxed_pads(pcb_data, config, net_ids):
-    """Grid-boxed pads of the nets in `net_ids`.
+def _footprints(pcb_data):
+    by_fp = {}
+    for p in _all_pads(pcb_data):
+        by_fp.setdefault(p.component_ref, []).append(p)
+    return by_fp
+
+
+def _bands(pcb_data, config, net_ids, by_fp=None):
+    """Candidate pads of the nets in `net_ids`: the fine-pitch SMD pads of
+    footprints with 4+ pads, with their outward exit model.
 
     Exit model: the track leaves the pad outward (away from its footprint's
     centroid, along the dominant axis) as a straight centreline at a
@@ -100,16 +170,14 @@ def find_grid_boxed_pads(pcb_data, config, net_ids):
     overlaps the corridor (pad centre to WINDOW_PITCHES pitches past the
     pad's outer edge). Returns dicts (pad, horiz, sgn, lo, hi, pitch, end):
     `end` is the corridor's far edge along the exit axis past every
-    neighbour that bounds it."""
+    neighbour that bounds it; the stub's targets lie just past it."""
     wanted = set(net_ids)
-    by_fp = {}
-    for plist in pcb_data.pads_by_net.values():
-        for p in plist:
-            by_fp.setdefault(p.component_ref, []).append(p)
-    grid = config.grid_step
+    by_fp = by_fp if by_fp is not None else _footprints(pcb_data)
+    refs = sorted({p.component_ref for nid in wanted
+                   for p in pcb_data.pads_by_net.get(nid, [])})
     out = []
-    for ref in sorted(by_fp):
-        pads = by_fp[ref]
+    for ref in refs:
+        pads = by_fp.get(ref, [])
         if len(pads) < 4:
             continue
         cx = sum(p.global_x for p in pads) / len(pads)
@@ -131,8 +199,7 @@ def find_grid_boxed_pads(pcb_data, config, net_ids):
             half_a, half_p = (phx, phy) if horiz else (phy, phx)
             near = []
             for q in pads:
-                if q is p or q.net_id == p.net_id or layer not in q.layers \
-                        and '*.Cu' not in q.layers:
+                if q is p or q.net_id == p.net_id or not _on_layer(q, layer):
                     continue
                 qhx, qhy = _half_extents(q)
                 near.append((q.global_x if horiz else q.global_y,
@@ -157,14 +224,24 @@ def find_grid_boxed_pads(pcb_data, config, net_ids):
                 far = qa + sgn * qha
                 end = max(end, far) if sgn > 0 else min(end, far)
             if lo > hi + 1e-9:
-                continue
-            if _has_line(lo, hi, grid) and not _raster_boxed(
-                    p, pads, layer, hw + clr, grid,
-                    half_a + WINDOW_PITCHES * pitch):
-                continue
+                continue  # no legal band at all: a stub cannot pass either
             out.append(dict(pad=p, layer=layer, horiz=horiz, sgn=sgn, lo=lo,
-                            hi=hi, pitch=pitch, end=end, hw=hw, clr=clr))
+                            hi=hi, pitch=pitch, end=end, hw=hw, clr=clr,
+                            reach=half_a + WINDOW_PITCHES * pitch))
     return out
+
+
+def _boxed(pcb_data, b, grid, pads=None):
+    return _raster_boxed(pcb_data, b['pad'], b['layer'], b['hw'] + b['clr'],
+                         grid, b['reach'], pads)
+
+
+def find_grid_boxed_pads(pcb_data, config, net_ids):
+    """Grid-boxed pads of the nets in `net_ids` against the board as it is
+    now (pads of every footprint, and the copper in pcb_data)."""
+    pads = _all_pads(pcb_data)
+    return [b for b in _bands(pcb_data, config, net_ids)
+            if _boxed(pcb_data, b, config.grid_step, pads)]
 
 
 def _has_own_copper(pcb_data, pad):
@@ -236,32 +313,144 @@ def _route_stub(pcb_data, b, config, net_clearances):
     return result
 
 
-def fine_escape_prepass(pcb_data, config, net_ids, all_swap_segments,
-                        net_clearances=None, verbose=False):
-    """Route and commit the escape stub of every grid-boxed pad of `net_ids`.
-    Returns (boxed, placed)."""
+class _State:
+    def __init__(self, nets, by_fp, pads, net_clearances, verbose):
+        self.nets = nets
+        self.by_fp = by_fp
+        self.pads = pads
+        self.net_clearances = net_clearances
+        self.verbose = verbose
+        self.pending = {}   # net id -> reserved stub segments in pcb_data
+        self.live = None    # (net id, segs, adopted) of the open bracket
+        self.laid = 0       # stub segments laid over the run
+        self.kept = 0       # stub segments handed to a successful route
+
+
+def _lay(pcb_data, st, net_id, config):
+    """Route the stubs of `net_id`'s boxed pads against the copper present
+    now and append them to pcb_data as the net's copper. Returns them."""
     from kicad_parser import Segment
     from pcb_modification import bump_copper_epoch
-
-    boxed = find_grid_boxed_pads(pcb_data, config, net_ids)
-    placed = 0
-    for b in boxed:
+    segs = []
+    for b in _bands(pcb_data, config, [net_id], st.by_fp):
         p = b['pad']
-        if _has_own_copper(pcb_data, p):
+        if _has_own_copper(pcb_data, p) or not _boxed(pcb_data, b, config.grid_step,
+                                                      st.pads):
             continue
-        result = _route_stub(pcb_data, b, config, net_clearances)
+        result = _route_stub(pcb_data, b, config, st.net_clearances)
         if result is None:
-            if verbose:
+            if st.verbose:
                 print(f"  fine escape: {p.component_ref}.{p.pad_number} "
                       f"({p.net_name}) not routed")
             continue
         for s in result.get('new_segments') or []:
             seg = Segment(start_x=s.start_x, start_y=s.start_y, end_x=s.end_x,
                           end_y=s.end_y, width=s.width, layer=s.layer,
-                          net_id=p.net_id)
+                          net_id=net_id)
             pcb_data.segments.append(seg)
-            all_swap_segments.append(seg)
+            segs.append(seg)
+    if segs:
         bump_copper_epoch(pcb_data)
-        placed += 1
-    print(f"Fine escape: {len(boxed)} grid-boxed pad(s), {placed} stub(s) placed")
-    return len(boxed), placed
+        st.laid += len(segs)
+    return segs
+
+
+def fine_escape_prepass(pcb_data, config, net_ids, net_clearances=None,
+                        verbose=False):
+    """Arm fine escape for `net_ids` and reserve the stubs of the pads that
+    are boxed on the board as it is before routing. Call before the obstacle
+    maps are built: a reserved stub is copper of an unrouted net, so every
+    other net's route keeps off it. Returns the number of nets reserved."""
+    by_fp = _footprints(pcb_data)
+    cands = _bands(pcb_data, config, net_ids, by_fp)
+    nets = {b['pad'].net_id for b in cands}
+    st = _State(nets, by_fp, _all_pads(pcb_data), net_clearances, verbose)
+    setattr(pcb_data, _STATE, st)
+    for nid in sorted(nets):
+        segs = _lay(pcb_data, st, nid, config)
+        if segs:
+            st.pending[nid] = segs
+    print(f"Fine escape: {len(cands)} candidate pad(s) on {len(nets)} net(s); "
+          f"{st.laid} stub segment(s) reserved on {len(st.pending)} net(s)")
+    return len(st.pending)
+
+
+def _drop(pcb_data, segs):
+    from pcb_modification import bump_copper_epoch
+    if not segs:
+        return
+    ids = {id(s) for s in segs}
+    pcb_data.segments[:] = [s for s in pcb_data.segments if id(s) not in ids]
+    bump_copper_epoch(pcb_data)
+
+
+def begin(pcb_data, net_id, config):
+    """Open the bracket around one route of `net_id`: adopt its reserved
+    stubs, or lay fresh ones against the copper present now. The stubs sit
+    in pcb_data as the net's copper while it routes. Returns a token for
+    `finish`."""
+    st = getattr(pcb_data, _STATE, None)
+    if st is None:
+        return None
+    if st.live is not None:  # a bracket an exception left open
+        nid, segs, adopted = st.live
+        if adopted:
+            st.pending[nid] = segs
+        else:
+            _drop(pcb_data, segs)
+        st.live = None
+    if net_id not in st.nets:
+        return None
+    if net_id in st.pending:
+        st.live = (net_id, st.pending.pop(net_id), True)
+    else:
+        segs = _lay(pcb_data, st, net_id, config)
+        if not segs:
+            return None
+        st.live = (net_id, segs, False)
+    if st.verbose:
+        print(f"  fine escape: {len(st.live[1])} stub segment(s) "
+              f"{'adopted' if st.live[2] else 'laid'}")
+    return st.live
+
+
+def finish(pcb_data, token, result):
+    """Close the bracket. A successful route takes the stubs: out of
+    pcb_data and to the front of its new_segments, so they are committed,
+    recorded and ripped with the route. A failed route leaves reserved stubs
+    reserved (the obstacle maps already hold them) and drops fresh ones (the
+    maps never saw them). Returns `result`."""
+    st = getattr(pcb_data, _STATE, None)
+    if token is None or st is None or st.live is not token:
+        return result
+    st.live = None
+    net_id, segs, adopted = token
+    if result and not result.get('failed'):
+        _drop(pcb_data, segs)
+        result['new_segments'] = list(segs) + list(result.get('new_segments') or [])
+        st.kept += len(segs)
+    elif adopted:
+        st.pending[net_id] = segs
+    else:
+        _drop(pcb_data, segs)
+    return result
+
+
+def release(pcb_data, working_obstacles=None, net_obstacles_cache=None,
+            config=None):
+    """End of the routing passes: take the reservations of nets that never
+    routed off the board, so no stub ships as unconnected copper and later
+    passes see the pads bare. Returns the number of nets released."""
+    st = getattr(pcb_data, _STATE, None)
+    if st is None or not st.pending:
+        return 0
+    nids = sorted(st.pending)
+    for nid in nids:
+        _drop(pcb_data, st.pending.pop(nid))
+    if config is not None:
+        from obstacle_cache import refresh_net_obstacles
+        refresh_net_obstacles(working_obstacles, net_obstacles_cache, pcb_data,
+                              config, nids)
+    print(f"Fine escape: {st.kept} stub segment(s) kept by routes; "
+          f"reservations of {len(nids)} unrouted net(s) released")
+    return len(nids)

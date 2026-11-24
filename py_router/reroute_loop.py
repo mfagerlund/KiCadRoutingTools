@@ -6,6 +6,7 @@ during diff pair or single-ended routing, extracted from route.py.
 """
 from __future__ import annotations
 
+import fine_escape
 import time
 from typing import List, Tuple
 
@@ -342,6 +343,7 @@ def run_reroute_loop(
             _olinks_rr = (getattr(state, 'oracle_links_by_net', None)
                           or {}).get(ripped_net_id)
             # Check for multi-point net (3+ pads, no existing segments since they were ripped)
+            _fe = fine_escape.begin(pcb_data, ripped_net_id, config)
             multipoint_pads = get_multipoint_net_pads(pcb_data, ripped_net_id, config)
             if _olinks_rr:
                 print(f"  Re-routing {len(_olinks_rr)} exact-fill oracle "
@@ -377,6 +379,7 @@ def run_reroute_loop(
                 result = route_net_with_obstacles(pcb_data, ripped_net_id, config, obstacles,
                                                   attraction_path=_attr,
                                                   reverse_direction=_rev)
+            result = fine_escape.finish(pcb_data, _fe, result)
             elapsed = time.time() - start_time
             total_time += elapsed
 
@@ -626,6 +629,7 @@ def run_reroute_loop(
                             _olinks_rt = (getattr(state, 'oracle_links_by_net',
                                                   None) or {}).get(ripped_net_id)
                             # Check for multi-point net in retry as well
+                            _fe = fine_escape.begin(pcb_data, ripped_net_id, config)
                             retry_multipoint_pads = get_multipoint_net_pads(pcb_data, ripped_net_id, config)
                             if _olinks_rt:
                                 retry_result = route_oracle_links(
@@ -653,6 +657,7 @@ def run_reroute_loop(
                                 retry_result = route_net_with_obstacles(pcb_data, ripped_net_id, config, retry_obstacles,
                                                                         attraction_path=_attr,
                                                                         reverse_direction=_rev)
+                            retry_result = fine_escape.finish(pcb_data, _fe, retry_result)
 
                             if retry_result and not retry_result.get('failed'):
                                 routed_length = calculate_route_length(retry_result['new_segments'], retry_result.get('new_vias', []), pcb_data)
