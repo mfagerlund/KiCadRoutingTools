@@ -2242,10 +2242,9 @@ def trim_net_stub_debris(pcb_data: PCBData, net_id: int, result, config,
     `swap_segments` is the run's `all_swap_segments` (swap reuse-connectors
     and fine-escape stubs), the writer's second SEGMENT source, and the same
     ghost applies: a stub dropped from `pcb_data.segments` alone frees its
-    cells while the writer still emits it. Measured on ecp5-dc-scm with
-    KICAD_FINE_ESCAPE=1: ROT_QSPI_DQ2's unused fine-escape stub was trimmed,
-    ROT_QSPI_DQ3 routed 0.2 mm from its still-written end (2 shorts, 2
-    clearance). Filtered in place for the same reason as `swap_vias`.
+    cells while the writer still emits it, and a neighbour net routes onto
+    the still-written end (shorts and clearance violations in the file).
+    Filtered in place for the same reason as `swap_vias`.
     """
     pads = pcb_data.pads_by_net.get(net_id, [])
     if not pads:
