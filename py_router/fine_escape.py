@@ -37,6 +37,7 @@ import routing_defaults as defaults
 
 # Window reach past the footprint edge, in pitches.
 WINDOW_PITCHES = 3
+ELONGATED = 1.5  # long/short half-extent ratio that fixes a pad's exit axis
 
 _STATE = '_fine_escape_state'
 
@@ -191,9 +192,17 @@ def _bands(pcb_data, config, net_ids, by_fp=None):
             hw = config.get_net_track_width(p.net_id, layer) / 2
             clr = config.get_net_clearance(p.net_id)
             dx, dy = p.global_x - cx, p.global_y - cy
-            horiz = abs(dx) >= abs(dy)
-            sgn = 1 if (dx if horiz else dy) >= 0 else -1
             phx, phy = _half_extents(p)
+            # An elongated row pad exits along its long axis; the centroid
+            # direction only decides square pads (a corner pad of a QFN is
+            # nearly diagonal from the centroid).
+            if phx > ELONGATED * phy:
+                horiz = True
+            elif phy > ELONGATED * phx:
+                horiz = False
+            else:
+                horiz = abs(dx) >= abs(dy)
+            sgn = 1 if (dx if horiz else dy) >= 0 else -1
             a0 = p.global_x if horiz else p.global_y
             pc = p.global_y if horiz else p.global_x
             half_a, half_p = (phx, phy) if horiz else (phy, phx)

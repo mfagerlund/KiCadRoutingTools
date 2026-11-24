@@ -59,19 +59,19 @@ def _fp(ref, x, y, pads):
             + ''.join(pads) + '\t)\n')
 
 
-def board_text(y_off, foreign=False):
+def board_text(y_off, foreign=False, rows=ROWS):
     nets = ['(net 0 "")', '(net 1 "GND")']
     u1, j1, j2 = [], [], []
     u1.append(_pad('EP', 0, 0, 2.4, 3.6, 1, 'GND', 'rect'))
     nid = 2
     for side, col in ((-1, j1), (1, j2)):
-        for k in range(ROWS):
+        for k in range(rows):
             name = f'S{nid - 1}'
             nets.append(f'(net {nid} "{name}")')
-            ly = -(ROWS - 1) * PITCH / 2 + k * PITCH
+            ly = -(rows - 1) * PITCH / 2 + k * PITCH
             u1.append(_pad(str(nid), side * 2.0, ly, 1.2, 0.3, nid, name))
             col.append(_pad('1' if not col else str(len(col) + 1), 0,
-                            -(ROWS - 1) * 0.75 + k * 1.5, 0.8, 0.8, nid, name,
+                            -(rows - 1) * 0.75 + k * 1.5, 0.8, 0.8, nid, name,
                             'circle'))
             nid += 1
     body = (_fp('U1', 110, 110 + y_off, u1) + _fp('J1', 103, 110, j1)
@@ -90,10 +90,10 @@ def board_text(y_off, foreign=False):
             '\t\t(layer "Edge.Cuts")\n\t)\n)\n')
 
 
-def _write(d, name, y_off, foreign=False):
+def _write(d, name, y_off, foreign=False, rows=ROWS):
     p = os.path.join(d, name)
     with open(p, 'w', encoding='utf-8') as f:
-        f.write(board_text(y_off, foreign))
+        f.write(board_text(y_off, foreign, rows))
     return evidence(p)
 
 
@@ -128,6 +128,25 @@ def check_foreign_neighbour(d):
     print(f"  foreign neighbour: {len(got)} grid-boxed pad(s), want 9")
     if len(got) != 9 or 'S1' not in names:
         return [f"foreign neighbour: boxed {names}, want the 8 inner pads and S1"]
+    return []
+
+
+def check_corner_pads(d):
+    """Long columns put inner pads nearer the centroid in x than in y; an
+    elongated row pad still exits along its long axis, so every inner pad
+    of both 16-pad columns is a grid-boxed candidate with a horizontal exit."""
+    from kicad_parser import parse_kicad_pcb
+    from fine_escape import find_grid_boxed_pads
+    rows = 16
+    pcb = parse_kicad_pcb(_write(d, 'corner.kicad_pcb', 0.0, rows=rows))
+    ids = [nid for nid, n in pcb.nets.items() if n.name.startswith('S')]
+    got = find_grid_boxed_pads(pcb, _config(), ids)
+    want = 2 * (rows - 2)
+    far = [b for b in got if abs(b['pad'].global_y - 110) > 2.0]
+    print(f"  corner pads: {len(got)} grid-boxed pad(s), want {want}; "
+          f"{len(far)} beyond |dy| > |dx|")
+    if len(got) != want or not far or not all(b['horiz'] for b in got):
+        return [f"corner pads: {len(got)} grid-boxed, want {want}, all horizontal exits"]
     return []
 
 
@@ -221,6 +240,7 @@ def main():
     d = tempfile.mkdtemp(prefix='t2030_')
     try:
         errs = (check_detection(d) + check_foreign_neighbour(d)
+                + check_corner_pads(d)
                 + check_reservation(d) + check_routing(d, 0.0)
                 + check_routing(d, 0.05))
     finally:
