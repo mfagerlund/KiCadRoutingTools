@@ -4431,6 +4431,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             del net_ids[:]
             del single_ended_nets[:]
 
+    # Fine escape windows: a pad the run grid cannot leave gets an escape
+    # stub at the rescue grid, reserved here BEFORE the base map build and
+    # made part of its net's route when the net routes (see fine_escape.py).
+    if env_knobs.FINE_ESCAPE and single_ended_nets:
+        from fine_escape import fine_escape_prepass
+        fine_escape_prepass(pcb_data, config,
+                            [nid for _, nid in single_ended_nets],
+                            net_clearances=net_clearances, verbose=verbose)
+
     # Build base obstacle map once (excludes all nets we're routing)
     all_net_ids_to_route = [nid for _, nid in net_ids]
 
@@ -5175,6 +5184,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         progress_callback=phase3_progress_callback,
         cancel_check=cancel_check,
     )
+
+    # Fine escape: reserved stubs of nets that never routed leave the board
+    if env_knobs.FINE_ESCAPE:
+        import fine_escape as _fe_rel
+        _fe_rel.release(pcb_data, state.working_obstacles,
+                        state.net_obstacles_cache, config)
 
     # Issue #134: nets whose stale copper would have shorted another net on
     # restore were left ripped instead of re-added (collision-safe restore).

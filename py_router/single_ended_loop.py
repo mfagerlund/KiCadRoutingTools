@@ -6,6 +6,7 @@ extracted from route.py for better maintainability.
 """
 from __future__ import annotations
 
+import fine_escape
 import env_knobs
 import os
 import time
@@ -841,6 +842,7 @@ def route_single_ended_nets(
         # the reconcile lap loop instead.
         _olinks = (getattr(state, 'oracle_links_by_net', None) or {}).get(net_id)
         # Check for multi-point net (3+ pads, no existing segments)
+        _fe = fine_escape.begin(pcb_data, net_id, cfg_route)
         multipoint_pads = get_multipoint_net_pads(pcb_data, net_id, config)
         # Hold the A* search diagnostics until we know whether this net failed;
         # a stall that the router recovers from needs no explanation (--verbose
@@ -864,6 +866,7 @@ def route_single_ended_nets(
                 result = route_net_with_obstacles(pcb_data, net_id, cfg_route, obstacles,
                                                   attraction_path=attraction_path,
                                                   reverse_direction=reverse_direction)
+        result = fine_escape.finish(pcb_data, _fe, result)
 
         elapsed = time.time() - start_time
         total_time += elapsed
@@ -1380,6 +1383,7 @@ def route_single_ended_nets(
                         _olinks_r = (getattr(state, 'oracle_links_by_net', None)
                                      or {}).get(net_id)
                         # Check for multi-point net in retry as well
+                        _fe = fine_escape.begin(pcb_data, net_id, config)
                         retry_multipoint_pads = get_multipoint_net_pads(pcb_data, net_id, config)
                         if _olinks_r:
                             retry_result = route_oracle_links(
@@ -1396,6 +1400,7 @@ def route_single_ended_nets(
                             retry_result = route_net_with_obstacles(pcb_data, net_id, config, retry_obstacles,
                                                                      attraction_path=retry_attraction_path,
                                                                      reverse_direction=retry_reverse_direction)
+                        retry_result = fine_escape.finish(pcb_data, _fe, retry_result)
 
                         if retry_result and not retry_result.get('failed'):
                             route_length = calculate_route_length(retry_result['new_segments'], retry_result.get('new_vias', []), pcb_data)
