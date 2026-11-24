@@ -10,6 +10,7 @@ Phase 3 connects remaining pads to the main route.
 """
 from __future__ import annotations
 
+import fine_escape
 import env_knobs
 import os
 import time
@@ -1604,6 +1605,7 @@ def _retry_victim_main_with_ripup(
             from global_plan import plan_attraction_path
             _attr = plan_attraction_path(config, victim_id, pcb_data)
             _rev = False
+        _fe = fine_escape.begin(pcb_data, victim_id, config)
         if was_multipoint:
             multipoint_pads = get_multipoint_net_pads(pcb_data, victim_id, config)
             if multipoint_pads:
@@ -1615,6 +1617,7 @@ def _retry_victim_main_with_ripup(
         else:
             result = route_net_with_obstacles(pcb_data, victim_id, config, obstacles,
                                               attraction_path=_attr, reverse_direction=_rev)
+        result = fine_escape.finish(pcb_data, _fe, result)
 
         if result and not result.get('failed') \
                 and (result.get('path') or result.get('phase1_exhausted')):
@@ -1703,6 +1706,7 @@ def _reroute_phase3_ripped_nets(
         # PRE-EXISTING victim's registration (copper from an earlier step)
         # carries no mst_edges, so a 3-pad victim used to re-route as a
         # 2-terminal net with no taps and ship a pad open (#1554).
+        _fe = fine_escape.begin(pcb_data, ripped_net_id, config)
         multipoint_pads = get_multipoint_net_pads(pcb_data, ripped_net_id, config)
         was_multipoint = bool(multipoint_pads)
 
@@ -1719,6 +1723,7 @@ def _reroute_phase3_ripped_nets(
             # Route the main path for simple nets
             result = route_net_with_obstacles(pcb_data, ripped_net_id, config, obstacles,
                                               attraction_path=_attr, reverse_direction=_rev)
+        result = fine_escape.finish(pcb_data, _fe, result)
 
         # A victim whose main re-route fails BARE strands, and the #85
         # arbitration then abandons the (successful) tap rip-up that ripped
