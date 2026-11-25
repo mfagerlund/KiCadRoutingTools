@@ -2,6 +2,7 @@
 
 use pyo3::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::cell::Cell;
 use std::collections::BinaryHeap;
 
 use crate::obstacle_map::GridObstacleMap;
@@ -67,11 +68,15 @@ pub(crate) struct NodeStore {
     tiles: Vec<Tile>,
     index: FxHashMap<u64, u32>, // tile key -> index into tiles
     closed_count: u32,
+    /// One-entry tile cache (key, tile index): neighbours mostly share the
+    /// popped node's tile, so most lookups skip the hash probe. Key u64::MAX
+    /// is never a real tile key (GridState packs 48 bits).
+    last: Cell<(u64, u32)>,
 }
 
 impl NodeStore {
     fn new() -> Self {
-        Self { tiles: Vec::new(), index: FxHashMap::default(), closed_count: 0 }
+        Self { tiles: Vec::new(), index: FxHashMap::default(), closed_count: 0, last: Cell::new((u64::MAX, 0)) }
     }
 
     /// Tile hash key: the tile coordinates reuse GridState's 20/20/8 packing
@@ -93,6 +98,10 @@ impl NodeStore {
     #[inline]
     fn ensure_index(&mut self, gx: i32, gy: i32, layer: u8) -> u32 {
         let key = Self::tile_key(gx, gy, layer);
+        let (lk, lt) = self.last.get();
+        if lk == key {
+            return lt * TILE_CELLS + Self::slot_of(gx, gy);
+        }
         let tile_idx = match self.index.get(&key) {
             Some(&t) => t,
             None => {
@@ -107,6 +116,7 @@ impl NodeStore {
                 t
             }
         };
+        self.last.set((key, tile_idx));
         tile_idx * TILE_CELLS + Self::slot_of(gx, gy)
     }
 
@@ -114,8 +124,15 @@ impl NodeStore {
     /// combined read the neighbor loops need (old: closed.contains + g_costs.get).
     #[inline]
     fn g_closed_at(&self, gx: i32, gy: i32, layer: u8) -> (i32, bool) {
-        match self.index.get(&Self::tile_key(gx, gy, layer)) {
-            Some(&t) => {
+        let key = Self::tile_key(gx, gy, layer);
+        let (lk, lt) = self.last.get();
+        let hit = if lk == key { Some(lt) } else {
+            let h = self.index.get(&key).copied();
+            if let Some(t) = h { self.last.set((key, t)); }
+            h
+        };
+        match hit {
+            Some(t) => {
                 let s = &self.tiles[t as usize].slots[Self::slot_of(gx, gy) as usize];
                 (s.g, s.parent & CLOSED_BIT32 != 0)
             }
