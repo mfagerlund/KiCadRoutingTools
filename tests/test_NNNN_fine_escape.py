@@ -26,7 +26,8 @@ Checks:
   4. the stubs belong to their net's routing: the pre-pass reserves them as
      the net's copper; a failed route keeps the reservation, a successful
      one takes the stubs into its new_segments (and off the board as loose
-     copper); `release` leaves no stub of an unrouted net on the board.
+     copper); `release` leaves no stub of an unrouted net on the board;
+  5. the pre-pass is opt-in: KICAD_FINE_ESCAPE unset leaves it off, =1 arms it.
 """
 import contextlib
 import io
@@ -236,10 +237,32 @@ def check_routing(d, y_off):
     return errs
 
 
+def check_opt_in():
+    import env_knobs
+    saved = os.environ.pop('KICAD_FINE_ESCAPE', None)
+    try:
+        env_knobs.refresh()
+        off = env_knobs.FINE_ESCAPE
+        os.environ['KICAD_FINE_ESCAPE'] = '1'
+        env_knobs.refresh()
+        on = env_knobs.FINE_ESCAPE
+    finally:
+        os.environ.pop('KICAD_FINE_ESCAPE', None)
+        if saved is not None:
+            os.environ['KICAD_FINE_ESCAPE'] = saved
+        env_knobs.refresh()
+    errs = []
+    if off:
+        errs.append("KICAD_FINE_ESCAPE unset arms the pre-pass, want opt-in")
+    if not on:
+        errs.append("KICAD_FINE_ESCAPE=1 does not arm the pre-pass")
+    return errs
+
+
 def main():
     d = tempfile.mkdtemp(prefix='tNNNN_fe_')
     try:
-        errs = (check_detection(d) + check_foreign_neighbour(d)
+        errs = (check_opt_in() + check_detection(d) + check_foreign_neighbour(d)
                 + check_corner_pads(d)
                 + check_reservation(d) + check_routing(d, 0.0)
                 + check_routing(d, 0.05))

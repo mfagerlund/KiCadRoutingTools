@@ -95,10 +95,7 @@ def test_rung_recovers_boxed_in_nets():
              '--grid-step', '0.1', '--via-size', '0.3', '--via-drill', '0.15',
              '--json-out', js],
             capture_output=True, text=True, encoding='utf-8',
-            errors='replace', cwd=ROOT_DIR,
-            # the main pass must leave these nets open for the rung: the
-            # fine-escape pre-pass would route the boxed pads first (fine_escape.py)
-            env=dict(tool_env(), KICAD_FINE_ESCAPE='0'))
+            errors='replace', env=tool_env(), cwd=ROOT_DIR)
         log = r.stdout + r.stderr
         assert r.returncode == 0, log[-3000:]
         evidence(js)
