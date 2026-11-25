@@ -22,3 +22,4 @@ mimalloc = { version = "0.1", default-features = false }  # EXPERIMENT: page-ret
 lto = true
 codegen-units = 1
 opt-level = 3
+debug = true
