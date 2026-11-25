@@ -4,6 +4,11 @@ use pyo3::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::cell::Cell;
 use std::collections::BinaryHeap;
+use std::sync::Mutex;
+
+/// Census (measurement only): trajectory of the last route_with_frontier search.
+/// (initial_h, best_h, best_h_iter, iterations, gaps[(start_iter, len)] for stalls >= 1000, checkpoints[(iter, best_h)]).
+pub static LAST_CENSUS: Mutex<Option<(i32, i32, u32, u32, Vec<(u32, u32)>, Vec<(u32, i32)>)>> = Mutex::new(None);
 
 use crate::obstacle_map::GridObstacleMap;
 use crate::types::{GridState, OpenEntry, RouteStats, SearchSink, StatsSink, FrontierSink, DIRECTIONS, ORTHO_COST, DIAG_COST, DEFAULT_TURN_COST};
@@ -431,6 +436,10 @@ pub(crate) struct GridSearch {
     grace_used: u32,
     /// Extension tranches granted (RouteStats.iteration_tranches).
     pub(crate) tranches_granted: u32,
+    pub(crate) best_h_iter: u32,
+    pub(crate) census_gaps: Vec<(u32, u32)>,
+    pub(crate) census_ckpt: Vec<(u32, i32)>,
+    census_next_ckpt: u32,
 }
 
 impl GridSearch {
@@ -516,7 +525,18 @@ impl GridSearch {
             grace_tranches: 0,
             grace_used: 0,
             tranches_granted: 0,
+            best_h_iter: 0,
+            census_gaps: Vec::new(),
+            census_ckpt: Vec::new(),
+            census_next_ckpt: 1000,
         }
+    }
+
+    pub(crate) fn census_store(&self) {
+        let mut gaps = self.census_gaps.clone();
+        let tail = self.iterations - self.best_h_iter;
+        if tail >= 1000 { gaps.push((self.best_h_iter, tail)); }
+        *LAST_CENSUS.lock().unwrap() = Some((self.initial_h, self.best_h, self.best_h_iter, self.iterations, gaps, self.census_ckpt.clone()));
     }
 
     /// #529: allow the search to earn extra +base_iterations tranches up to
@@ -608,6 +628,13 @@ impl GridSearch {
         let h_now = current_entry.f_score.saturating_sub(g);
         if h_now < self.best_h {
             self.best_h = h_now;
+            let gap = self.iterations - self.best_h_iter;
+            if gap >= 1000 { self.census_gaps.push((self.best_h_iter, gap)); }
+            self.best_h_iter = self.iterations;
+        }
+        if self.iterations >= self.census_next_ckpt {
+            self.census_ckpt.push((self.iterations, self.best_h));
+            self.census_next_ckpt = ((self.census_next_ckpt as u64 * 5 / 4).min(u32::MAX as u64)) as u32;
         }
 
         // Check if reached target
@@ -1231,6 +1258,7 @@ impl GridRouter {
             match search.step(self, obstacles, &mut sink) {
                 SearchStep::Found(goal_idx, _g) => {
                     let path = search.store.reconstruct_path(goal_idx);
+                    search.census_store();
                     return (Some(path), search.iterations, Vec::new());
                 }
                 SearchStep::IterationCap | SearchStep::Exhausted => break,
@@ -1238,7 +1266,14 @@ impl GridRouter {
             }
         }
 
+        search.census_store();
         (None, search.iterations, sink.tracker.get_blocked())
+    }
+
+    /// Census: (initial_h, best_h, best_h_iter, iterations, gaps, checkpoints) of the
+    /// last route_with_frontier search, or None.
+    pub fn last_census(&self) -> Option<(i32, i32, u32, u32, Vec<(u32, u32)>, Vec<(u32, i32)>)> {
+        LAST_CENSUS.lock().unwrap().clone()
     }
 }
 

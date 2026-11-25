@@ -2355,6 +2355,19 @@ def _probe_route_with_frontier(
 
 _ASTAR_LOG = os.environ.get('KRT_ASTAR_LOG')
 _ASTAR_SEQ = [0]
+_ASTAR_NET = ['?']
+
+
+def _astar_ctx():
+    import sys as _s
+    f = _s._getframe(3)
+    out = []
+    while f is not None and len(out) < 6:
+        n = f.f_code.co_name
+        if not n.startswith('_probe_route_with_frontier'):
+            out.append(n)
+        f = f.f_back
+    return '<'.join(out)
 
 
 def _astar(kind, cap, router, obstacles, src, tgt, iters_arg, **kw):
@@ -2368,10 +2381,20 @@ def _astar(kind, cap, router, obstacles, src, tgt, iters_arg, **kw):
     out = 'path' if path is not None else ('exhausted' if it < cap else 'cap')
     _ASTAR_SEQ[0] += 1
     import json as _j
+    cen = None
+    try:
+        cen = router.last_census()
+    except Exception:
+        pass
+    rec = {'seq': _ASTAR_SEQ[0], 'net': _ASTAR_NET[0], 'kind': kind, 'cap': cap, 'iters': it, 'out': out,
+           's': round(dt, 5), 'ns': len(src), 'nt': len(tgt), 'ctx': _astar_ctx(),
+           'src0': list(src[0]) if src else None, 'tgt0': list(tgt[0]) if tgt else None,
+           'blocked': len(_b) if _b is not None else 0}
+    if cen is not None:
+        rec.update({'h0': cen[0], 'hbest': cen[1], 'hbest_it': cen[2],
+                    'gaps': [list(g) for g in cen[4]], 'ckpt': [list(c) for c in cen[5]]})
     with open(_ASTAR_LOG, 'a') as f:
-        f.write(_j.dumps({'seq': _ASTAR_SEQ[0], 'kind': kind, 'cap': cap, 'iters': it, 'out': out,
-                          's': round(dt, 5), 'ns': len(src), 'nt': len(tgt),
-                          'src0': list(src[0]) if src else None, 'tgt0': list(tgt[0]) if tgt else None}) + '\n')
+        f.write(_j.dumps(rec) + '\n')
     return res
 
 
@@ -2422,6 +2445,11 @@ def _probe_route_with_frontier_once(
     first_label, second_label = direction_labels
     probe_iterations = config.max_probe_iterations
     _ver = via_exclusion_radius
+    if _ASTAR_LOG:
+        try:
+            _ASTAR_NET[0] = pcb_data.nets[current_net_id].name if (pcb_data is not None and current_net_id in pcb_data.nets) else str(current_net_id)
+        except Exception:
+            _ASTAR_NET[0] = str(current_net_id)
     # #568: rung-aware via legality for THIS search only (set via a config
     # clone by the escalation retry; 0 = baseline, byte-identical in Rust).
     _vrung = getattr(config, 'via_rung', 0)
