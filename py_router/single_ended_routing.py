@@ -2353,6 +2353,28 @@ def _probe_route_with_frontier(
     return result
 
 
+_ASTAR_LOG = os.environ.get('KRT_ASTAR_LOG')
+_ASTAR_SEQ = [0]
+
+
+def _astar(kind, cap, router, obstacles, src, tgt, iters_arg, **kw):
+    """Instrumented route_with_frontier (KRT_ASTAR_LOG): kind, cap, iterations, outcome, seconds."""
+    if not _ASTAR_LOG:
+        return router.route_with_frontier(obstacles, src, tgt, iters_arg, **kw)
+    t0 = time.perf_counter()
+    res = router.route_with_frontier(obstacles, src, tgt, iters_arg, **kw)
+    dt = time.perf_counter() - t0
+    path, it, _b = res
+    out = 'path' if path is not None else ('exhausted' if it < cap else 'cap')
+    _ASTAR_SEQ[0] += 1
+    import json as _j
+    with open(_ASTAR_LOG, 'a') as f:
+        f.write(_j.dumps({'seq': _ASTAR_SEQ[0], 'kind': kind, 'cap': cap, 'iters': it, 'out': out,
+                          's': round(dt, 5), 'ns': len(src), 'nt': len(tgt),
+                          'src0': list(src[0]) if src else None, 'tgt0': list(tgt[0]) if tgt else None}) + '\n')
+    return res
+
+
 def _probe_route_with_frontier_once(
     router: 'GridRouter',
     obstacles: 'GridObstacleMap',
@@ -2409,7 +2431,7 @@ def _probe_route_with_frontier_once(
     second_total_iters = 0
 
     # Probe forward direction
-    path, iterations, blocked_cells = router.route_with_frontier(
+    path, iterations, blocked_cells = _astar('probe_fwd', probe_iterations, router,
         obstacles, forward_sources, forward_targets, probe_iterations, track_margin=track_margin, via_exclusion_radius=_ver, via_rung=_vrung,
         collinear_vias=env_knobs.COLLINEAR_VIAS)
     first_probe_iters = iterations
@@ -2449,7 +2471,7 @@ def _probe_route_with_frontier_once(
         # Forward probe reached max - do full search
         _diag(f"{print_prefix}Probe: {first_label}={first_probe_iters} iters [single-direction bus mode], trying full iterations...")
         _dyn_base, _dyn_kw = _dynamic_iterations(config)
-        path, full_iters, full_blocked = router.route_with_frontier(
+        path, full_iters, full_blocked = _astar('full_single', _dyn_base, router,
             obstacles, forward_sources, forward_targets, _dyn_base, track_margin=track_margin, via_exclusion_radius=_ver, via_rung=_vrung,
         collinear_vias=env_knobs.COLLINEAR_VIAS, **_dyn_kw)
         _note_dynamic_extension(full_iters, _dyn_base, print_prefix)
@@ -2464,7 +2486,7 @@ def _probe_route_with_frontier_once(
         return path, total_iterations, forward_blocked, backward_blocked, False, fwd_iters, bwd_iters
 
     # Probe backward direction (bidirectional mode)
-    path, iterations, blocked_cells = router.route_with_frontier(
+    path, iterations, blocked_cells = _astar('probe_bwd', probe_iterations, router,
         obstacles, forward_targets, forward_sources, probe_iterations, track_margin=track_margin, via_exclusion_radius=_ver, via_rung=_vrung,
         collinear_vias=env_knobs.COLLINEAR_VIAS)
     second_probe_iters = iterations
@@ -2511,7 +2533,7 @@ def _probe_route_with_frontier_once(
     _diag(f"{print_prefix}Probe: {first_label}={first_probe_iters}, {second_label}={second_probe_iters} iters, trying {first_label} with full iterations...")
 
     _dyn_base, _dyn_kw = _dynamic_iterations(config)
-    path, full_iters, full_blocked = router.route_with_frontier(
+    path, full_iters, full_blocked = _astar('full_fwd', _dyn_base, router,
         obstacles, forward_sources, forward_targets, _dyn_base, track_margin=track_margin, via_exclusion_radius=_ver, via_rung=_vrung,
         collinear_vias=env_knobs.COLLINEAR_VIAS, **_dyn_kw)
     _note_dynamic_extension(full_iters, _dyn_base, print_prefix)
@@ -2527,7 +2549,7 @@ def _probe_route_with_frontier_once(
     _diag(f"{print_prefix}No route found after {full_iters} iterations ({first_label}), trying {second_label}...")
     forward_blocked = full_blocked
 
-    path, backward_full_iters, backward_full_blocked = router.route_with_frontier(
+    path, backward_full_iters, backward_full_blocked = _astar('full_bwd', _dyn_base, router,
         obstacles, forward_targets, forward_sources, _dyn_base, track_margin=track_margin, via_exclusion_radius=_ver, via_rung=_vrung,
         collinear_vias=env_knobs.COLLINEAR_VIAS, **_dyn_kw)
     _note_dynamic_extension(backward_full_iters, _dyn_base, print_prefix)
