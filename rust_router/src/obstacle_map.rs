@@ -994,20 +994,46 @@ impl GridObstacleMap {
         let radius_sq = radius * radius;
         let radius_f = radius as f32;
 
-        for (gcx, gcy) in stubs {
-            for dx in -radius..=radius {
-                for dy in -radius..=radius {
-                    let dist_sq = dx * dx + dy * dy;
-                    if dist_sq <= radius_sq {
-                        let dist = (dist_sq as f32).sqrt();
-                        let proximity = 1.0 - (dist / radius_f);
-                        let cost = (proximity * max_cost as f32) as i32;
+        // The disk's (dx, dy, cost) cells, once per call, in the scan order
+        // the per-stub loop always used. A cell whose cost is <= 0 never
+        // changes the map (it only ever max-inserts above the 0 default), so
+        // it is left out; every other cell does exactly the lookup/insert it
+        // did before, so the map's contents AND its insertion sequence are
+        // unchanged. A stub repeated at the same grid point re-stamps the
+        // same disk and changes nothing, so it is stamped once.
+        let mut disk: Vec<(i32, i32, i32)> = Vec::new();
+        for dx in -radius..=radius {
+            for dy in -radius..=radius {
+                let dist_sq = dx * dx + dy * dy;
+                if dist_sq <= radius_sq {
+                    let dist = (dist_sq as f32).sqrt();
+                    let proximity = 1.0 - (dist / radius_f);
+                    let cost = (proximity * max_cost as f32) as i32;
+                    if cost > 0 {
+                        disk.push((dx, dy, cost));
+                    }
+                }
+            }
+        }
+        if disk.is_empty() {
+            return;
+        }
 
-                        let key = pack_xy(gcx + dx, gcy + dy);
-                        let existing = self.stub_proximity.get(&key).copied().unwrap_or(0);
-                        if cost > existing {
-                            self.stub_proximity.insert(key, cost);
+        let mut seen: FxHashSet<(i32, i32)> = FxHashSet::default();
+        for (gcx, gcy) in stubs {
+            if !seen.insert((gcx, gcy)) {
+                continue;
+            }
+            for &(dx, dy, cost) in &disk {
+                let key = pack_xy(gcx + dx, gcy + dy);
+                match self.stub_proximity.get_mut(&key) {
+                    Some(existing) => {
+                        if cost > *existing {
+                            *existing = cost;
                         }
+                    }
+                    None => {
+                        self.stub_proximity.insert(key, cost);
                     }
                 }
             }

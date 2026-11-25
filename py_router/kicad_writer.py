@@ -147,16 +147,7 @@ def strip_zero_length_edge_cuts(content: str) -> str:
         if m.start() < i:
             continue
         s0 = m.start()
-        depth = 0
-        end = None
-        for j in range(s0, min(s0 + 4000, len(content))):
-            if content[j] == '(':
-                depth += 1
-            elif content[j] == ')':
-                depth -= 1
-                if depth == 0:
-                    end = j + 1
-                    break
+        end = _close_within(content, s0, s0 + 4000)
         if end is None:
             continue
         blk = content[s0:end]
@@ -174,6 +165,25 @@ def strip_zero_length_edge_cuts(content: str) -> str:
     print(f"Dropped {removed} zero-length Edge.Cuts primitive(s) "
           f"(KiCad grades these as invalid_outline and slows to a crawl)")
     return ''.join(out)
+
+
+_PAREN = re.compile(r'[()]')
+
+
+def _close_within(content: str, s0: int, limit: int):
+    """Index just past the `)` that closes the `(` at `s0`, counting every
+    paren (quotes are NOT special) and looking only below `limit`; None when
+    the group does not close there. Steps paren to paren with a compiled
+    regex instead of testing every character in Python."""
+    depth = 0
+    for m in _PAREN.finditer(content, s0, limit):
+        if m.group() == '(':
+            depth += 1
+        else:
+            depth -= 1
+            if depth == 0:
+                return m.end()
+    return None
 
 
 def _functional_footprint_spans(content: str):
