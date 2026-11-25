@@ -164,5 +164,45 @@ finally:
 ok(f'5: a {len(_ladder)}-rung escalation over 4 nets builds one base per rung',
    len(_calls) == len(_ladder), f'{len(_calls)} builds')
 
+# 6. A base carried to a new copper epoch is stamped with copper only, so a
+# pad, zone or config input that changed in between (a BGA keep-out, a pad
+# moved to another net, a pad added) must rebuild it, never rebase it.
+def _changed_inputs(label, change):
+    pcb = board()
+    cfg = GridRouteConfig(layers=list(LAYERS))
+    name = f'6 {label}: the next epoch rebuilds, equal to a fresh build'
+    env_knobs.NET_MAP_VERIFY = True
+    try:
+        net_rescue._pristine_rescue_map(pcb, pcb, cfg, 2, {}, ('full',))
+        change(pcb, cfg)
+        pcb.segments.append(make_seg(3.0, 2.0, 3.0, 12.0, net_id=2))
+        bump_copper_epoch(pcb)
+        got = net_rescue._pristine_rescue_map(pcb, pcb, cfg, 4, {}, ('full',))
+        fresh = obstacle_map.build_base_obstacle_map(pcb, cfg, [4], net_clearances={})
+        ok(name, digest(got) is not None and digest(got) == digest(fresh))
+    except AssertionError as exc:
+        ok(name, False, str(exc))
+    finally:
+        env_knobs.NET_MAP_VERIFY = False
+
+
+def _bga(pcb, cfg):
+    cfg.bga_exclusion_zones = [(4.0, 4.0, 8.0, 10.0)]
+
+
+def _pad_moved(pcb, cfg):
+    pad = pcb.pads_by_net[5].pop()
+    pad.net_id = 6
+    pcb.pads_by_net[6] = pcb.pads_by_net[6] + [pad]
+
+
+def _pad_added(pcb, cfg):
+    pcb.pads_by_net[7] = pcb.pads_by_net[7] + [make_pad(7, 9.0, 9.0, ref='T1', num='1')]
+
+
+_changed_inputs('BGA keep-out set', _bga)
+_changed_inputs('pad moved to another net', _pad_moved)
+_changed_inputs('pad added', _pad_added)
+
 print(f'\n{len(fails)} failure(s)' if fails else '\nall passed')
 sys.exit(1 if fails else 0)

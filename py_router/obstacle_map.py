@@ -211,7 +211,8 @@ def _segment_copper_key(seg):
 
 
 def _via_copper_key(via):
-    return ('v', via.net_id, via.x, via.y, via.size, via.drill, tuple(via.layers or ()))
+    return ('v', via.net_id, via.x, via.y, via.size, via.drill, tuple(via.layers or ()),
+            getattr(via, 'via_type', None))
 
 
 def copper_snapshot(pcb_data, previous=None) -> dict:

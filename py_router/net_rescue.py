@@ -460,6 +460,44 @@ def _closest_pair(points_a, points_b):
     return best
 
 
+def _fp_value(v, depth=0):
+    """A hashable stand-in for a config or board value: scalars and small
+    containers by value, anything else by identity (a replaced object is a
+    changed input; an object edited in place keeps its identity, which every
+    in-run edit of these inputs avoids by assigning a new one)."""
+    if v is None or isinstance(v, (bool, int, float, str, bytes)):
+        return v
+    if depth < 3 and isinstance(v, (list, tuple)):
+        return (type(v).__name__, len(v), tuple(_fp_value(x, depth + 1) for x in v))
+    if depth < 3 and isinstance(v, (set, frozenset)):
+        return ('set', len(v), tuple(sorted((repr(_fp_value(x, depth + 1)) for x in v))))
+    if depth < 3 and isinstance(v, dict):
+        return ('dict', len(v), tuple(sorted(((repr(k), _fp_value(x, depth + 1))
+                                              for k, x in v.items()), key=lambda t: t[0])))
+    return ('id', id(v))
+
+
+def _non_copper_fingerprint(pcb, cfg):
+    """What a no-net base depends on besides tracks and vias: every config
+    field, and the board's pads, footprints, zones, keep-outs and outline.
+    A base carried to a new copper epoch (`rebase_no_net_map`) is stamped
+    with copper only, so it is valid only while this is unchanged."""
+    import dataclasses
+    if dataclasses.is_dataclass(cfg):
+        c = tuple((f.name, _fp_value(getattr(cfg, f.name, None)))
+                  for f in dataclasses.fields(cfg))
+    else:
+        c = tuple(sorted((k, _fp_value(v)) for k, v in vars(cfg).items()))
+    names = ({f.name for f in dataclasses.fields(cfg)}
+             if dataclasses.is_dataclass(cfg) else set(vars(cfg)))
+    extra = tuple(sorted((k, _fp_value(v)) for k, v in vars(cfg).items()
+                         if k not in names))
+    pads = tuple((nid, id(lst), len(lst)) for nid, lst in pcb.pads_by_net.items())
+    board_fp = tuple((k, id(getattr(pcb, k, None)), len(getattr(pcb, k, None) or ()))
+                     for k in ('footprints', 'zones', 'keepout_zones', 'nets'))
+    return (c, extra, pads, board_fp, id(pcb.board_info))
+
+
 # The longest terminal escalation ladder: up to three size rungs and the
 # #1853 copper-clearance-alone rung (`_escalation_ladder`).
 RESCUE_BASE_LRU = 4
@@ -485,15 +523,29 @@ def _delta_rescue_map(pcb, cfg, net_id, net_clearances, key):
     cache = getattr(pcb, '_rescue_base_cache', None)
     if cache is None:
         cache = pcb._rescue_base_cache = OrderedDict()
+    fp = _non_copper_fingerprint(pcb, cfg)
     entry = cache.get(bkey)
-    if entry is not None and entry[3] != epoch:
-        base, records, snap, _ = entry
+    if entry is not None and entry[4] != fp:
+        # The key names the geometry, not every input: a pad, zone or
+        # config field that changed since the base was built makes it a
+        # different board, which no copper delta carries over.
+        if env_knobs.NET_MAP_VERIFY:
+            _old = entry[4]
+            _parts = ('config', 'config attrs', 'pads', 'board', 'board_info')
+            _diff = [n for n, a, b in zip(_parts, _old, fp) if a != b]
+            if _diff and _diff[0].startswith('config'):
+                _i = _parts.index(_diff[0])
+                _diff += [str(x[0]) for x, y in zip(_old[_i], fp[_i]) if x != y][:8]
+            print(f'  rescue base rebuilt: non-copper inputs changed ({", ".join(_diff)})')
         entry = None
-        if base is not None and not any(records):
+    if entry is not None and entry[3] != epoch:
+        base, records, snap, _, _ = entry
+        entry = None
+        if base is not None and not any(records) and incremental_net_eligible(pcb, cfg):
             try:
                 snap = rebase_no_net_map(base, snap, pcb, cfg, net_clearances=net_clearances,
                                          clearance_floor=floor)
-                entry = cache[bkey] = (base, records, snap, epoch)
+                entry = cache[bkey] = (base, records, snap, epoch, fp)
             except DeltaIneligible:
                 pass
     if entry is None:
@@ -503,7 +555,7 @@ def _delta_rescue_map(pcb, cfg, net_id, net_clearances, key):
                                            _clearance_floor=floor)
             records = tuple(getattr(pcb, _k, None) for _k in _LIFT_KEYS)
             snap = copper_snapshot(pcb) if not any(records) else None
-        entry = cache[bkey] = (base, records, snap, epoch)
+        entry = cache[bkey] = (base, records, snap, epoch, fp)
         # Each base is a whole-board map. Terminal escalation walks every
         # net through its whole ladder, so the cache holds one base per rung
         # or each net evicts the base the next net needs first.
