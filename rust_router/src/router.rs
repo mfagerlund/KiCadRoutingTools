@@ -429,6 +429,8 @@ pub(crate) struct GridSearch {
     grace_tranches: u32,
     /// Failing tranches consumed in the CURRENT plateau (reset on progress).
     grace_used: u32,
+    /// Target distance field heuristic (dist_field.rs); None = octile only.
+    field: Option<crate::dist_field::DistField>,
     /// Extension tranches granted (RouteStats.iteration_tranches).
     pub(crate) tranches_granted: u32,
 }
@@ -516,6 +518,40 @@ impl GridSearch {
             grace_tranches: 0,
             grace_used: 0,
             tranches_granted: 0,
+            field: None,
+        }
+    }
+
+    /// Heuristic for a pushed state: octile, raised to the distance field
+    /// where the field has a value.
+    #[inline]
+    fn h_of(&self, router: &GridRouter, s: &GridState) -> i32 {
+        let oct = router.heuristic_to_targets(s, &self.target_states, &self.target_hint);
+        if let Some(f) = &self.field {
+            if let Some(d) = f.get(s.gx, s.gy, s.layer as usize) {
+                let fh = (d as f32 * router.h_weight).min(i32::MAX as f32 / 2.0) as i32;
+                return oct.max(fh);
+            }
+        }
+        oct
+    }
+
+    /// Install a distance field before the first step: re-score the open
+    /// set (the sources) and reseed initial_h / best_h with it.
+    pub(crate) fn install_field(&mut self, router: &GridRouter,
+                                field: crate::dist_field::DistField) {
+        self.field = Some(field);
+        let entries: Vec<OpenEntry> = std::mem::take(&mut self.open_set).into_vec();
+        let mut initial_h = i32::MAX;
+        for mut e in entries {
+            let h = self.h_of(router, &e.state);
+            initial_h = initial_h.min(h);
+            e.f_score = e.g_score.saturating_add(h);
+            self.open_set.push(e);
+        }
+        if initial_h != i32::MAX {
+            self.initial_h = initial_h;
+            self.best_h = initial_h;
         }
     }
 
@@ -809,7 +845,7 @@ impl GridSearch {
                     if self.opts.via_exclusion_radius > 0 {
                         self.path_vias.insert(neighbor_key, current_vias.clone());
                     }
-                    let h = router.heuristic_to_targets(&neighbor, &self.target_states, &self.target_hint);
+                    let h = self.h_of(router, &neighbor);
                     self.open_set.push(OpenEntry {
                         f_score: new_g.saturating_add(h), // B4: no i32 wrap on huge h
                         g_score: new_g,
@@ -944,7 +980,7 @@ impl GridSearch {
                             self.path_vias.insert(neighbor_key, new_vias);
                         }
                     }
-                    let h = router.heuristic_to_targets(&neighbor, &self.target_states, &self.target_hint);
+                    let h = self.h_of(router, &neighbor);
                     self.open_set.push(OpenEntry {
                         f_score: new_g.saturating_add(h), // B4: no i32 wrap on huge h
                         g_score: new_g,
@@ -1146,8 +1182,14 @@ impl GridRouter {
                                       direction_steps, track_margin);
         opts.via_rung = via_rung;
         let mut sink = StatsSink::default();
+        let field_src = if dist_h_enabled(max_iterations) { Some((sources.clone(), targets.clone())) } else { None };
         let mut search = GridSearch::new(self, sources, targets, max_iterations, opts, &mut sink);
         search.set_iteration_ceiling(max_iterations_ceiling, quantum_cells, quantum_pct, grace_tranches);
+        if let Some((src, tgt)) = field_src {
+            if let Some(f) = self.build_dist_field(obstacles, &src, &tgt, via_rung) {
+                search.install_field(self, f);
+            }
+        }
         sink.stats.initial_h = search.initial_h;
 
         loop {
@@ -1224,8 +1266,14 @@ impl GridRouter {
                                       direction_steps, track_margin);
         opts.via_rung = via_rung;
         let mut sink = FrontierSink::new();
+        let field_src = if dist_h_enabled(max_iterations) { Some((sources.clone(), targets.clone())) } else { None };
         let mut search = GridSearch::new(self, sources, targets, max_iterations, opts, &mut sink);
         search.set_iteration_ceiling(max_iterations_ceiling, quantum_cells, quantum_pct, grace_tranches);
+        if let Some((src, tgt)) = field_src {
+            if let Some(f) = self.build_dist_field(obstacles, &src, &tgt, via_rung) {
+                search.install_field(self, f);
+            }
+        }
 
         loop {
             match search.step(self, obstacles, &mut sink) {
@@ -1242,7 +1290,60 @@ impl GridRouter {
     }
 }
 
+/// KRT_DIST_H=1 enables the distance-field heuristic for searches whose
+/// budget is at least KRT_DIST_H_MIN iterations (default 50000: the full
+/// searches, not the 5000-iteration probes).
+fn dist_h_enabled(max_iterations: u32) -> bool {
+    use std::sync::OnceLock;
+    static CFG: OnceLock<Option<u32>> = OnceLock::new();
+    let cfg = CFG.get_or_init(|| {
+        if std::env::var("KRT_DIST_H").map_or(false, |v| v == "1") {
+            Some(std::env::var("KRT_DIST_H_MIN").ok().and_then(|v| v.parse().ok()).unwrap_or(50_000))
+        } else { None }
+    });
+    cfg.map_or(false, |m| max_iterations >= m)
+}
+
+fn dist_h_env(name: &str, default: i64) -> i64 {
+    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+
 impl GridRouter {
+    fn build_dist_field(&self, obstacles: &GridObstacleMap,
+                        sources: &[(i32, i32, u8)], targets: &[(i32, i32, u8)],
+                        via_rung: usize) -> Option<crate::dist_field::DistField> {
+        let t0 = std::time::Instant::now();
+        let n = obstacles.num_layers;
+        let phc = self.proximity_heuristic_cost.max(0) as i64;
+        let scale = |base: i32, l: usize| -> u32 {
+            ((base as i64 * self.layer_cost_or_default(l) as i64 / 1000) + phc).max(1) as u32
+        };
+        let costs = crate::dist_field::FieldCosts {
+            ortho: (0..n).map(|l| scale(ORTHO_COST, l)).collect(),
+            diag: (0..n).map(|l| scale(DIAG_COST, l)).collect(),
+            via: self.via_cost.max(0) as u32,
+            forbidden: (0..n).map(|l| self.layer_forbidden(l)).collect(),
+            via_rung,
+        };
+        let (mut lx, mut ly, mut hx, mut hy) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+        for &(x, y, _) in sources.iter().chain(targets.iter()) {
+            lx = lx.min(x); ly = ly.min(y); hx = hx.max(x); hy = hy.max(y);
+        }
+        let span = (hx - lx).max(hy - ly).max(0) as i64;
+        let margin = (span * dist_h_env("KRT_DIST_H_MARGIN_PCT", 50) / 100)
+            .max(dist_h_env("KRT_DIST_H_MARGIN_MIN", 100)) as i32;
+        let max_nodes = dist_h_env("KRT_DIST_H_MAX_NODES", 24_000_000) as usize;
+        let f = crate::dist_field::DistField::build(obstacles, &costs, sources, targets, margin, max_nodes);
+        if std::env::var("KRT_DIST_H_LOG").is_ok() {
+            match &f {
+                Some(f) => eprintln!("[dist_h] cells={} reached={} ms={:.1}", f.cells, f.source_reached,
+                                     t0.elapsed().as_secs_f64() * 1000.0),
+                None => eprintln!("[dist_h] skipped (window too large)"),
+            }
+        }
+        f
+    }
+
     /// FORBIDDEN LAYER (`--layer-costs -1` => a negative entry in `layer_costs`):
     /// the router never places a track on, nor ends a via on, such a layer. It
     /// still acts as an obstacle (its copper blocks via barrels) and through-vias
