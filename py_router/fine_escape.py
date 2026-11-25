@@ -333,9 +333,18 @@ class _State:
         self.live = None    # (net id, segs, adopted) of the open bracket
         self.laid = 0       # stub segments laid over the run
         self.kept = 0       # stub segments handed to a successful route
+        self.dogbone = set()  # nets whose reservations escape_reserve plans
+        self.plane = set()    # nets whose dog-bone reaches a pour: kept at release
 
 
 def _lay(pcb_data, st, net_id, config):
+    if net_id in st.dogbone:
+        import escape_reserve
+        return escape_reserve.lay_net(pcb_data, st, net_id, config)
+    return _lay_stubs(pcb_data, st, net_id, config)
+
+
+def _lay_stubs(pcb_data, st, net_id, config):
     """Route the stubs of `net_id`'s boxed pads against the copper present
     now and append them to pcb_data as the net's copper. Returns them."""
     from kicad_parser import Segment
@@ -385,12 +394,18 @@ def fine_escape_prepass(pcb_data, config, net_ids, net_clearances=None,
 
 
 def _drop(pcb_data, segs):
+    """Take reserved copper (segments and vias) out of pcb_data."""
     from pcb_modification import bump_copper_epoch
     if not segs:
         return
     ids = {id(s) for s in segs}
     pcb_data.segments[:] = [s for s in pcb_data.segments if id(s) not in ids]
+    pcb_data.vias[:] = [v for v in pcb_data.vias if id(v) not in ids]
     bump_copper_epoch(pcb_data)
+
+
+def _is_via(o):
+    return hasattr(o, 'drill') and not hasattr(o, 'start_x')
 
 
 def begin(pcb_data, net_id, config):
@@ -436,7 +451,11 @@ def finish(pcb_data, token, result):
     net_id, segs, adopted = token
     if result and not result.get('failed'):
         _drop(pcb_data, segs)
-        result['new_segments'] = list(segs) + list(result.get('new_segments') or [])
+        vias = [o for o in segs if _is_via(o)]
+        tracks = [o for o in segs if not _is_via(o)]
+        result['new_segments'] = tracks + list(result.get('new_segments') or [])
+        if vias:
+            result['new_vias'] = vias + list(result.get('new_vias') or [])
         st.kept += len(segs)
     elif adopted:
         st.pending[net_id] = segs
@@ -453,6 +472,10 @@ def release(pcb_data, working_obstacles=None, net_obstacles_cache=None,
     st = getattr(pcb_data, _STATE, None)
     if st is None or not st.pending:
         return 0
+    # A dog-bone of a net with a pour is the pin's plane connection: keep it.
+    planes = sorted(n for n in st.pending if n in st.plane)
+    for nid in planes:
+        st.kept += len(st.pending.pop(nid))
     nids = sorted(st.pending)
     for nid in nids:
         _drop(pcb_data, st.pending.pop(nid))
@@ -461,5 +484,6 @@ def release(pcb_data, working_obstacles=None, net_obstacles_cache=None,
         refresh_net_obstacles(working_obstacles, net_obstacles_cache, pcb_data,
                               config, nids)
     print(f"Fine escape: {st.kept} stub segment(s) kept by routes; "
-          f"reservations of {len(nids)} unrouted net(s) released")
+          f"reservations of {len(nids)} unrouted net(s) released"
+          + (f", {len(planes)} plane net(s) kept" if planes else ""))
     return len(nids)

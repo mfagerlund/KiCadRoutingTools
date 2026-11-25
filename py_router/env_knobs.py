@@ -328,6 +328,7 @@ def refresh() -> None:
     # '2' (so '1' or anything else disarms), and POUR_LAUNCH_FRAG keeps its
     # `or 0` empty-value rule -- see below for the one deliberate deviation.
     g['VIA_RUNG_2'] = os.environ.get('KICAD_VIA_RUNG', '2') == '2'
+    g['ESCAPE_RESERVE'] = _opt_in('KICAD_ESCAPE_RESERVE')  # plan and reserve a dog-bone (stub + via) per fine-pitch pin before routing (opt-in)
     g['FINE_ESCAPE'] = _opt_in('KICAD_FINE_ESCAPE')  # fine escape windows for grid-boxed pads (opt-in: #1843 and #1807 fixtures change)
     # NOT _f(): the call site was `float(get(name, '1.0') or 0)`, so an
     # EMPTY value means 0.0 (threshold disabled) where _f would hand back the

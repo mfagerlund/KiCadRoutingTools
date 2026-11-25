@@ -4438,6 +4438,13 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         fine_escape_prepass(pcb_data, config,
                             [nid for _, nid in single_ended_nets],
                             net_clearances=net_clearances, verbose=verbose)
+    # Escape reservation: every fine-pitch pin's dog-bone (stub + via) is
+    # planned jointly per part and reserved the same way (escape_reserve.py).
+    if env_knobs.ESCAPE_RESERVE and single_ended_nets:
+        from escape_reserve import escape_reserve_prepass
+        escape_reserve_prepass(pcb_data, config,
+                               [nid for _, nid in single_ended_nets],
+                               net_clearances=net_clearances, verbose=verbose)
 
     # Build base obstacle map once (excludes all nets we're routing)
     all_net_ids_to_route = [nid for _, nid in net_ids]
@@ -5177,7 +5184,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     )
 
     # Fine escape: reserved stubs of nets that never routed leave the board
-    if env_knobs.FINE_ESCAPE:
+    if env_knobs.FINE_ESCAPE or env_knobs.ESCAPE_RESERVE:
         import fine_escape as _fe_rel
         _fe_rel.release(pcb_data, state.working_obstacles,
                         state.net_obstacles_cache, config)
