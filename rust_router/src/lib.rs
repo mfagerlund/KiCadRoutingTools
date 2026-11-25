@@ -13,6 +13,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;  // v0.17.3: return free
 
 mod types;
 mod count_grid;
+mod dense_grid;
 mod obstacle_map;
 mod router;
 mod dubins;

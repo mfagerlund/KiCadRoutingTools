@@ -6,6 +6,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::types::{pack_xy, unpack_xy};
 use crate::count_grid::CountGrid;
+use crate::dense_grid::{DenseMirror, Probe};
 
 /// Per-layer bitmap of blocked cells (S2, issue #384). A PURE CACHE of
 /// "refcount > 0" for `GridObstacleMap.blocked_cells`: the refcount hashmaps
@@ -234,6 +235,10 @@ pub struct GridObstacleMap {
     pub stub_proximity: FxHashMap<u64, i32>,
     /// Layer-specific proximity costs (for track proximity on same layer)
     pub layer_proximity_costs: Vec<FxHashMap<u64, i32>>,
+    /// Dense read mirrors of `stub_proximity` / `layer_proximity_costs`
+    /// (A* hot path). Written ONLY next to the map writes below.
+    stub_prox_dense: DenseMirror,
+    layer_prox_dense: Vec<DenseMirror>,
     /// Number of layers
     #[pyo3(get)]
     pub num_layers: usize,
@@ -267,6 +272,7 @@ pub struct GridObstacleMap {
 
 #[pymethods]
 impl GridObstacleMap {
+
     #[new]
     pub fn new(num_layers: usize) -> Self {
         Self {
@@ -278,6 +284,8 @@ impl GridObstacleMap {
             blocked_vias_rungs: Vec::new(),
             stub_proximity: FxHashMap::default(),
             layer_proximity_costs: (0..num_layers).map(|_| FxHashMap::default()).collect(),
+            stub_prox_dense: DenseMirror::default(),
+            layer_prox_dense: (0..num_layers).map(|_| DenseMirror::default()).collect(),
             num_layers,
             bga_zones: Vec::new(),
             bga_proximity_radius: 0,
@@ -335,6 +343,8 @@ impl GridObstacleMap {
             blocked_vias_rungs: self.blocked_vias_rungs.clone(),
             stub_proximity: self.stub_proximity.clone(),
             layer_proximity_costs: self.layer_proximity_costs.clone(),
+            stub_prox_dense: self.stub_prox_dense.clone(),
+            layer_prox_dense: self.layer_prox_dense.clone(),
             num_layers: self.num_layers,
             bga_zones: self.bga_zones.clone(),
             bga_proximity_radius: self.bga_proximity_radius,
@@ -362,6 +372,8 @@ impl GridObstacleMap {
             blocked_vias_rungs: self.blocked_vias_rungs.clone(),
             stub_proximity: self.stub_proximity.clone(),
             layer_proximity_costs: self.layer_proximity_costs.clone(),
+            stub_prox_dense: self.stub_prox_dense.clone(),
+            layer_prox_dense: self.layer_prox_dense.clone(),
             num_layers: self.num_layers,
             bga_zones: self.bga_zones.clone(),
             bga_proximity_radius: self.bga_proximity_radius,
@@ -461,6 +473,7 @@ impl GridObstacleMap {
     /// Clear stub proximity costs and zone centers (for reuse with different stubs).
     pub fn clear_stub_proximity(&mut self) {
         self.stub_proximity.clear();
+        self.stub_prox_dense.clear();
     }
 
     /// Shrink all internal collections to fit their contents.
@@ -1010,6 +1023,7 @@ impl GridObstacleMap {
         let existing = self.stub_proximity.get(&key).copied().unwrap_or(0);
         if cost > existing {
             self.stub_proximity.insert(key, cost);
+            self.stub_prox_dense.set(gx, gy, cost);
         }
     }
 
@@ -1043,6 +1057,7 @@ impl GridObstacleMap {
                         let existing = self.stub_proximity.get(&key).copied().unwrap_or(0);
                         if cost > existing {
                             self.stub_proximity.insert(key, cost);
+                            self.stub_prox_dense.set(gcx + dx, gcy + dy, cost);
                         }
                     }
                 }
@@ -1110,6 +1125,8 @@ impl GridObstacleMap {
                 } else {
                     *entry += cost;
                 }
+                let (gx, gy) = unpack_xy(key);
+                self.stub_prox_dense.set(gx, gy, *entry);
             }
         }
     }
@@ -1305,7 +1322,7 @@ impl GridObstacleMap {
     #[inline]
     pub fn is_in_any_proximity_zone(&self, gx: i32, gy: i32) -> bool {
         // Check stub proximity (has non-zero cost at this position)
-        if self.stub_proximity.get(&pack_xy(gx, gy)).copied().unwrap_or(0) > 0 {
+        if self.stub_prox_at(gx, gy) > 0 {
             return true;
         }
         // Check BGA proximity
@@ -1319,10 +1336,10 @@ impl GridObstacleMap {
         // Lookup FIRST, exemption scan only on a nonzero hit (soft-knobs P4:
         // the exempt loop ran per lookup even for cells with no stub cost --
         // and the C5 single-ended exemptions made the list longer).
-        let cost = match self.stub_proximity.get(&pack_xy(gx, gy)) {
-            Some(&c) if c != 0 => c,
-            _ => return 0,
-        };
+        let cost = self.stub_prox_at(gx, gy);
+        if cost == 0 {
+            return 0;
+        }
         if self.endpoint_exempt_radius > 0 {
             let radius_sq = self.endpoint_exempt_radius * self.endpoint_exempt_radius;
             for (ex, ey) in &self.endpoint_exempt_positions {
@@ -1342,6 +1359,7 @@ impl GridObstacleMap {
             let key = pack_xy(gx, gy);
             let entry = self.layer_proximity_costs[layer].entry(key).or_insert(0);
             *entry = (*entry).max(cost);
+            self.layer_prox_dense[layer].set(gx, gy, *entry);
         }
     }
 
@@ -1358,6 +1376,7 @@ impl GridObstacleMap {
                 let key = pack_xy(gx, gy);
                 let entry = self.layer_proximity_costs[layer].entry(key).or_insert(0);
                 *entry = (*entry).max(cost);
+                self.layer_prox_dense[layer].set(gx, gy, *entry);
             }
         }
     }
@@ -1368,16 +1387,22 @@ impl GridObstacleMap {
         if layer >= self.num_layers {
             return 0;
         }
-        self.layer_proximity_costs[layer]
-            .get(&pack_xy(gx, gy))
-            .copied()
-            .unwrap_or(0)
+        match self.layer_prox_dense[layer].probe(gx, gy) {
+            Probe::Hit(v) => v,
+            Probe::Miss => self.layer_proximity_costs[layer]
+                .get(&pack_xy(gx, gy))
+                .copied()
+                .unwrap_or(0),
+        }
     }
 
     /// Clear layer-specific proximity costs
     pub fn clear_layer_proximity(&mut self) {
         for layer_map in &mut self.layer_proximity_costs {
             layer_map.clear();
+        }
+        for d in &mut self.layer_prox_dense {
+            d.clear();
         }
     }
 
@@ -1409,8 +1434,9 @@ impl GridObstacleMap {
         }
 
         // No attraction bonus in stub proximity zones (near unrouted stubs)
-        let key = pack_xy(gx, gy);
-        if self.stub_proximity.contains_key(&key) {
+        // Map entries are always > 0 (every writer stores a positive cost),
+        // so presence == nonzero mirror value.
+        if self.stub_prox_at(gx, gy) != 0 {
             return 0;
         }
 
@@ -1541,6 +1567,15 @@ impl GridObstacleMap {
 // #[pymethods] block: pyo3 wraps every method in that block for Python, and a
 // method returning `&mut FxHashMap` cannot be wrapped.
 impl GridObstacleMap {
+    /// Stub proximity value at a cell (mirror first, map on spill).
+    #[inline]
+    fn stub_prox_at(&self, gx: i32, gy: i32) -> i32 {
+        match self.stub_prox_dense.probe(gx, gy) {
+            Probe::Hit(v) => v,
+            Probe::Miss => self.stub_proximity.get(&pack_xy(gx, gy)).copied().unwrap_or(0),
+        }
+    }
+
     fn rung_map_mut(&mut self, rung: usize) -> &mut CountGrid {
         // rung 0 is blocked_vias; callers route rung 0 there explicitly
         let idx = rung - 1;
