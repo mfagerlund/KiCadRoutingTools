@@ -188,10 +188,7 @@ def row_b_kit_board():
                   + BASE, accept=True)
         r = run_check(py + [os.path.join(ROOT, 'py_router', 'route.py'),
                             evidence(poured, 'poured board'), out, '--nets', 'GND',
-                            '--json-out', js] + BASE, accept=True,
-                      # The fixture needs the finalize descent on boxed
-                      # fine-pitch taps; fine escape routes them out first.
-                      env=dict(os.environ, KICAD_FINE_ESCAPE='0'))
+                            '--json-out', js] + BASE, accept=True)
         log = r.stdout
         with open(os.path.splitext(evidence(out, 'routed board'))[0]
                   + '.kicad_pro', encoding='utf-8') as fh:
