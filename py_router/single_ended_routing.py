@@ -2367,10 +2367,16 @@ def _astar(kind, cap, router, obstacles, src, tgt, iters_arg, **kw):
     path, it, _b = res
     out = 'path' if path is not None else ('exhausted' if it < cap else 'cap')
     _ASTAR_SEQ[0] += 1
+    reach = None
+    if path is None and kind.startswith('full'):
+        t1 = time.perf_counter()
+        ok, vis = router.reachable(obstacles, src, tgt, track_margin=kw.get('track_margin', 0.0),
+                                   via_rung=kw.get('via_rung', 0))
+        reach = [bool(ok), int(vis), round(time.perf_counter() - t1, 5)]
     import json as _j
     with open(_ASTAR_LOG, 'a') as f:
         f.write(_j.dumps({'seq': _ASTAR_SEQ[0], 'kind': kind, 'cap': cap, 'iters': it, 'out': out,
-                          's': round(dt, 5), 'ns': len(src), 'nt': len(tgt),
+                          's': round(dt, 5), 'ns': len(src), 'nt': len(tgt), 'reach': reach,
                           'src0': list(src[0]) if src else None, 'tgt0': list(tgt[0]) if tgt else None}) + '\n')
     return res
 

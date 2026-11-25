@@ -1223,6 +1223,63 @@ impl GridRouter {
 
         (None, search.iterations, sink.tracker.get_blocked())
     }
+
+    /// Relaxed reachability (BFS, no costs, no path-dependent rules): (reached, visited).
+    /// Stops early at max_cells visited states (then reached = true: unknown counts as reachable).
+    #[pyo3(signature = (obstacles, sources, targets, track_margin=TrackMarginArg::Scalar(0.0), via_rung=0, max_cells=0))]
+    pub fn reachable(
+        &self,
+        obstacles: &GridObstacleMap,
+        sources: Vec<(i32, i32, u8)>,
+        targets: Vec<(i32, i32, u8)>,
+        track_margin: TrackMarginArg,
+        via_rung: usize,
+        max_cells: usize,
+    ) -> (bool, usize) {
+        use std::collections::{HashSet, VecDeque};
+        let tset: HashSet<(i32, i32, u8)> = targets.iter().copied().collect();
+        let mut seen: HashSet<(i32, i32, u8)> = HashSet::new();
+        let mut q: VecDeque<(i32, i32, u8)> = VecDeque::new();
+        for s0 in sources {
+            if seen.insert(s0) {
+                q.push_back(s0);
+            }
+        }
+        while let Some((x, y, l)) = q.pop_front() {
+            if tset.contains(&(x, y, l)) {
+                return (true, seen.len());
+            }
+            if max_cells > 0 && seen.len() >= max_cells {
+                return (true, seen.len());
+            }
+            if !self.layer_forbidden(l as usize) {
+                for (dx, dy) in DIRECTIONS {
+                    let (nx, ny) = (x + dx, y + dy);
+                    if obstacles.segment_blocked(x, y, nx, ny, l as usize, track_margin.at(l as usize)) {
+                        continue;
+                    }
+                    if seen.insert((nx, ny, l)) {
+                        q.push_back((nx, ny, l));
+                    }
+                }
+            }
+            let free_here = obstacles.is_free_via(x, y);
+            if !obstacles.is_via_blocked_rung(x, y, via_rung) || free_here {
+                for nl in 0..obstacles.num_layers as u8 {
+                    if nl == l || self.layer_forbidden(nl as usize) {
+                        continue;
+                    }
+                    if obstacles.segment_blocked(x, y, x, y, nl as usize, track_margin.at(nl as usize)) {
+                        continue;
+                    }
+                    if seen.insert((x, y, nl)) {
+                        q.push_back((x, y, nl));
+                    }
+                }
+            }
+        }
+        (false, seen.len())
+    }
 }
 
 impl GridRouter {
