@@ -207,6 +207,30 @@ def _in_any_span(pos: int, spans) -> bool:
     return False
 
 
+_BARE_PAREN = re.compile(r'[()]')
+
+
+def _bare_paren_end(content: str, start: int) -> int:
+    """Index past the `)` closing the `(` at `start`, counting EVERY paren
+    (quoted ones too), or `start` when it never closes.
+
+    Exactly the per-character depth walk `move_copper_graphics_to_silkscreen`
+    always used, jumping between parens with a C-level regex scan instead of
+    stepping each character in Python. Deliberately NOT `find_matching_paren`:
+    that one skips quoted parens, and changing which block a shape spans is a
+    behaviour change, not a speedup.
+    """
+    depth = 0
+    for m in _BARE_PAREN.finditer(content, start):
+        if m.group() == '(':
+            depth += 1
+        else:
+            depth -= 1
+            if depth == 0:
+                return m.end()
+    return start
+
+
 def move_copper_graphics_to_silkscreen(content: str) -> str:
     """Move graphic primitives (logos / artwork drawn as polys, lines, arcs, ...)
     from copper layers to silkscreen, mirroring move_copper_text_to_silkscreen:
@@ -235,6 +259,11 @@ def move_copper_graphics_to_silkscreen(content: str) -> str:
     """
     kept = 0
     count = 0
+    # Spans of `content` as it stands, or None when not yet taken for this
+    # text. Taken lazily -- only a net-less copper fp_* shape asks -- and
+    # dropped only when a pass actually rewrote the text; a pass that
+    # relocated nothing leaves every offset where it was.
+    _keep_spans = None
     for tag in _COPPER_GRAPHIC_TAGS:
         # RECOMPUTED per tag pass, not hoisted: this loop rewrites `content`
         # at the end of every iteration and each relocation grows the text by
@@ -244,7 +273,7 @@ def move_copper_graphics_to_silkscreen(content: str) -> str:
         # land-pattern copper was relocated anyway -- the exact deletion this
         # gate exists to stop, and silently, because the "Kept ..." line
         # drifts away with it.
-        _keep_spans = _functional_footprint_spans(content)
+        moved_before = count
         token = '(' + tag
         tlen = len(token)
         result_parts = []
@@ -259,16 +288,7 @@ def move_copper_graphics_to_silkscreen(content: str) -> str:
             if nxt and (nxt.isalnum() or nxt == '_'):
                 i = start + tlen
                 continue
-            depth = 0
-            end = start
-            for j in range(start, len(content)):
-                if content[j] == '(':
-                    depth += 1
-                elif content[j] == ')':
-                    depth -= 1
-                    if depth == 0:
-                        end = j + 1
-                        break
+            end = _bare_paren_end(content, start)
             block = content[start:end]
             layer_match = re.search(r'\(layer\s+"(F\.Cu|B\.Cu)"\)', block)
             # #337: a NET-TIED copper graphic is FUNCTIONAL copper (the router
@@ -287,6 +307,9 @@ def move_copper_graphics_to_silkscreen(content: str) -> str:
                 name_match = re.search(r'\(net\s+"((?:[^"\\]|\\.)*)"\)', block)
                 net_tied = bool(name_match and name_match.group(1) != '')
             if (layer_match and not net_tied and tag in _FP_MODELLED_TAGS
+                    and _keep_spans is None):
+                _keep_spans = _functional_footprint_spans(content)
+            if (layer_match and not net_tied and tag in _FP_MODELLED_TAGS
                     and _in_any_span(start, _keep_spans)):
                 # #908: this footprint has pads, so its copper is the part's
                 # own land pattern, not decoration. Leave it on copper -- the
@@ -304,6 +327,8 @@ def move_copper_graphics_to_silkscreen(content: str) -> str:
             i = end
         result_parts.append(content[last_end:])
         content = ''.join(result_parts)
+        if count != moved_before:
+            _keep_spans = None
 
     if count > 0:
         print(f"  Moved {count} copper graphic(s)/logo(s) to silkscreen")
