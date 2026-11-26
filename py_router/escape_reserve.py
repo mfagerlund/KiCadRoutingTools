@@ -586,9 +586,16 @@ def escape_reserve_prepass(pcb_data, config, net_ids, net_clearances=None,
         st = fe._State(set(), fe._footprints(pcb_data), fe._all_pads(pcb_data),
                        net_clearances, verbose)
         setattr(pcb_data, fe._STATE, st)
+    zones = _zone_nets(pcb_data)
+    names = {p.net_id: p.net_name for ps in pcb_data.pads_by_net.values() for p in ps}
+    # A power-like net with no pour has no plane to drop into: its pins route
+    # like signals, and a reservation it fails to use only blocks neighbours.
+    nozone = sorted({names.get(n) or '' for n in net_ids
+                     if n not in zones and POWER_NAME.match(names.get(n) or '')})
+    net_ids = [n for n in net_ids
+               if n in zones or not POWER_NAME.match(names.get(n) or '')]
     fines = _fine_pins(pcb_data, config, net_ids, st.by_fp)
     nets = {p.net_id for _, _, fine, _ in fines for p in fine}
-    zones = _zone_nets(pcb_data)
     planned, unplaced = plan(pcb_data, config, net_ids, st.by_fp, verbose=verbose)
     n_pins = sum(len(v) for v in planned.values())
     laid = 0
@@ -606,14 +613,12 @@ def escape_reserve_prepass(pcb_data, config, net_ids, net_clearances=None,
     st.laid += laid
     if laid:
         bump_copper_epoch(pcb_data)
-    nozone = sorted({p.net_name for _, _, fine, _ in fines for p in fine
-                     if p.net_id not in zones and POWER_NAME.match(p.net_name or '')})
     print(f"Escape reserve: {sum(len(f) for _, _, f, _ in fines)} fine pin(s) on "
           f"{len(fines)} part(s); {n_pins} dog-bone(s) reserved on "
           f"{len(planned)} net(s), {len(unplaced)} pin(s) without a legal site")
     if nozone:
-        print(f"Escape reserve: power-like net(s) with no zone on this board "
-              f"(no plane via, none invented): {', '.join(nozone)}")
+        print(f"Escape reserve: power-like net(s) with no zone, not reserved "
+              f"(routed as signals): {', '.join(n for n in nozone if n)}")
     if verbose:
         for p in unplaced:
             print(f"  escape reserve: {p.component_ref}.{p.pad_number} "

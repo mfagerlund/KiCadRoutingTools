@@ -4890,6 +4890,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         progress_callback=progress_callback,
     )
 
+    if env_knobs.ESCAPE_RESERVE:
+        import fine_escape as _fe_bind
+        _fe_bind.bind_maps(pcb_data, state, config)
+
     # Create local aliases for frequently-used state fields
     routed_net_ids = state.routed_net_ids
     routed_net_paths = state.routed_net_paths
