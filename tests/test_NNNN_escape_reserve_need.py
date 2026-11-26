@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-"""Escape reservation plans only the row pins that need a via.
+"""Escape reservation skips the row pins whose net is local.
 
-A fine-pitch row pin whose net ends on pads of the pin's own layer leaves
-the row by a stub on that layer: a dog-bone reserved for it is copper it
-does not need, and while it is reserved it blocks its neighbours' exits.
-Only pins whose net cannot finish on their layer (every other pad of the net
-is on another layer) get a reservation.
+A fine-pitch row pin whose net ends on a pad of the pin's own layer a short
+way off (a decoupling cap, an adjacent part) leaves the row by a stub: a
+dog-bone reserved for it is copper it does not need, and while it is
+reserved it blocks its neighbours' exits. Pins whose net ends far away or on
+another layer keep their reservation.
 
 Fixture: a single column of N signal pads, 0.5 mm pitch, on F.Cu, with an
-exposed GND pad behind them. Net k ends on a pad of a far connector: on
-F.Cu for even k, on B.Cu for odd k.
+exposed GND pad behind them. Net k ends on one pad of a second part, placed
+near (2 mm) or far (9 mm) from the row, on F.Cu, B.Cu or through-hole.
 
 Checks:
-  1. the planner reserves dog-bones for exactly the B.Cu-ending nets;
-  2. a net whose far pad is through-hole (reachable on every layer) gets
-     no reservation;
+  1. near F.Cu finishes get no reservation; far F.Cu and near B.Cu
+     finishes do;
+  2. a near through-hole finish (reachable on every layer) gets none;
   3. release() drops the bracket's reference to the routing state, so the
      pass's obstacle maps do not outlive routing.
 """
@@ -44,7 +44,7 @@ def _smd(num, x, y, sx, sy, net, name, shape, layer):
 
 def _tht(num, x, y, net, name):
     return (f'\t\t(pad "{num}" thru_hole circle\n\t\t\t(at {x:.4f} {y:.4f})\n'
-            f'\t\t\t(size 0.9 0.9)\n\t\t\t(drill 0.5)\n'
+            f'\t\t\t(size 0.4 0.4)\n\t\t\t(drill 0.2)\n'
             f'\t\t\t(layers "*.Cu" "*.Mask")\n'
             f'\t\t\t(net {net} "{name}")\n\t\t)\n')
 
@@ -59,7 +59,8 @@ def _fp(ref, x, y, pads, layer='F.Cu'):
 
 
 def board_text(far):
-    """`far(k)` -> 'F', 'B' or 'T' (through-hole) for net k's far pad."""
+    """`far(k)` -> (kind, dx): kind 'F', 'B' or 'T' (through-hole) and the
+    x offset (mm) of net k's far pad from its row pin."""
     nets = ['(net 0 "")', '(net 1 "GND")']
     span = (N - 1) * PITCH
     u1 = [_smd('EP', -1.6, 0, 2.0, span + 0.6, 1, 'GND', 'rect', 'F.Cu')]
@@ -70,13 +71,13 @@ def board_text(far):
         nets.append(f'(net {nid} "{name}")')
         u1.append(_smd(str(k + 1), 0, -span / 2 + k * PITCH, 0.8, 0.25, nid,
                        name, 'roundrect', 'F.Cu'))
-        y = -(N - 1) * 0.75 + k * 1.5
-        kind = far(k)
-        j1.append(_tht(str(k + 1), 0, y, nid, name) if kind == 'T' else
-                  _smd(str(k + 1), 0, y, 0.8, 0.8, nid, name, 'circle',
+        y = -span / 2 + k * PITCH
+        kind, dx = far(k)
+        j1.append(_tht(str(k + 1), dx, y, nid, name) if kind == 'T' else
+                  _smd(str(k + 1), dx, y, 0.3, 0.3, nid, name, 'circle',
                        'F.Cu' if kind == 'F' else 'B.Cu'))
     half_h = (N - 1) * 0.75 + 1.5
-    body = _fp('U1', ROW_X, 110, u1) + _fp('J1', ROW_X + 9.0, 110, j1)
+    body = _fp('U1', ROW_X, 110, u1) + _fp('J1', ROW_X, 110, j1)
     return ('(kicad_pcb\n\t(version 20241229)\n\t(generator "test_NNNN_escape_reserve_need")\n'
             '\t(general\n\t\t(thickness 1.6)\n\t)\n'
             '\t(layers\n\t\t(0 "F.Cu" signal)\n\t\t(31 "B.Cu" signal)\n'
@@ -111,17 +112,18 @@ def _planned_names(pcb):
 
 
 def check_need(d):
-    pcb = _load(d, 'need.kicad_pcb', lambda k: 'F' if k % 2 == 0 else 'B')
+    kinds = [('F', 2.0), ('F', 9.0), ('B', 2.0), ('F', 2.0)]
+    pcb = _load(d, 'need.kicad_pcb', lambda k: kinds[k % 4])
     got = _planned_names(pcb)
-    want = sorted(f'S{k + 1}' for k in range(N) if k % 2)
+    want = sorted(f'S{k + 1}' for k in range(N) if k % 4 in (1, 2))
     print(f"  reserved: {', '.join(got) or '-'} (want {', '.join(want)})")
     if got != want:
-        return [f"need: reserved {got}, want only the B.Cu-ending nets {want}"]
+        return [f"need: reserved {got}, want only the far/B.Cu-ending nets {want}"]
     return []
 
 
 def check_tht(d):
-    pcb = _load(d, 'tht.kicad_pcb', lambda k: 'T')
+    pcb = _load(d, 'tht.kicad_pcb', lambda k: ('T', 2.0))
     got = _planned_names(pcb)
     print(f"  through-hole far pads: reserved {', '.join(got) or 'none'}")
     if got:
@@ -132,7 +134,7 @@ def check_tht(d):
 def check_release_maps(d):
     import escape_reserve as er
     import fine_escape as fe
-    pcb = _load(d, 'rel.kicad_pcb', lambda k: 'B')
+    pcb = _load(d, 'rel.kicad_pcb', lambda k: ('B', 9.0))
     cfg = _config()
     ids = [nid for nid, n in pcb.nets.items() if n.name.startswith('S')]
     with contextlib.redirect_stdout(io.StringIO()):
