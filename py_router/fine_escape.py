@@ -575,9 +575,15 @@ def release(pcb_data, working_obstacles=None, net_obstacles_cache=None,
     routed off the board, so no stub ships as unconnected copper and later
     passes see the pads bare. Returns the number of nets released."""
     st = getattr(pcb_data, _STATE, None)
-    if st is None or not st.pending:
+    if st is None:
         return 0
+    # Nothing is pending after this, so the bound routing state is never read
+    # again: drop it, or its obstacle maps outlive the pass into the pour
+    # refill that follows (emberone: +2.7 GB peak, killed at the memory cap).
+    st.maps = None
     st.failed = set()
+    if not st.pending:
+        return 0
     # A dog-bone of a net with a pour is the pin's plane connection: keep it.
     planes = sorted(n for n in st.pending if n in st.plane)
     for nid in planes:

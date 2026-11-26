@@ -254,6 +254,19 @@ def _fine_pins(pcb_data, config, net_ids, by_fp):
     return out
 
 
+def _needs_via(pcb_data, p, layer, zones):
+    """A row pin needs a reserved via only when its net cannot finish on the
+    pin's own layer: the net has a pour (the via is its plane drop), or no
+    pad of the net off p's footprint reaches `layer`. A pin whose net ends on
+    pads of its own layer leaves the row by a stub; a reservation it never
+    uses only blocks its neighbours' exits."""
+    if p.net_id in zones:
+        return True
+    others = [q for q in pcb_data.pads_by_net.get(p.net_id, [])
+              if q.component_ref != p.component_ref]
+    return bool(others) and not any(fe._on_layer(q, layer) for q in others)
+
+
 def _dest(pcb_data, p):
     """Centroid of p's net pads off p's footprint, or None."""
     qs = [q for q in pcb_data.pads_by_net.get(p.net_id, [])
@@ -460,6 +473,7 @@ def plan(pcb_data, config, net_ids, by_fp=None, only_pads=None, verbose=False):
     board = _Board(pcb_data, config)
     planned, unplaced = {}, []
     parts = _fine_pins(pcb_data, config, net_ids, by_fp)
+    zones = _zone_nets(pcb_data)
     # BGAs first (every inner ball needs its via), then rows finest first: a
     # net that already holds a reserved via at a finer part reaches every
     # layer there, so its pins on a coarser row escape without a second one.
@@ -474,6 +488,8 @@ def plan(pcb_data, config, net_ids, by_fp=None, only_pads=None, verbose=False):
             if not bga and only_pads is None and p.net_id in planned:
                 continue
             layer = next(l for l in p.layers if l in config.layers)
+            if not bga and not _needs_via(pcb_data, p, layer, zones):
+                continue
             w = config.get_net_track_width(p.net_id, layer)
             clr = config.get_net_clearance(p.net_id)
             jobs.append((p, layer, w, clr, _dest(pcb_data, p)))
