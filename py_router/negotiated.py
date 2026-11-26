@@ -386,7 +386,7 @@ def _debug_sealed(state, nid, picked, origs, index, coord, layer_names):
                     print('          ' + row)
 
 
-def route_negotiated(state, single_ended_nets: List[Tuple[str, int]], cancel_check=None):
+def route_negotiated(state, single_ended_nets: List[Tuple[str, int]], cancel_check=None, decide=None):
     """Route single_ended_nets by negotiated congestion. Returns (successful, rest, seconds): rest are the
     (name, id) the sequential loop still has to route."""
     t0 = time.time()
@@ -492,7 +492,139 @@ def route_negotiated(state, single_ended_nets: List[Tuple[str, int]], cancel_che
     if corridors is not None:
         print(f"Negotiated main pass: corridors for {n_corr} of {len(picked)} nets (factor {corridor_factor:g})")
     return _negotiate_and_commit(state, router, picked, rest, origs, terms_of, taps, tapped_nets, coord,
-                                 layer_names, w, h, t_terms, t0)
+                                 layer_names, w, h, t_terms, t0, decide)
+
+
+def _narrow_widths(state, nets):
+    """{net id: (name, routing width, narrowed width)} of the nets that may narrow (net_rescue.narrow_track_width:
+    the board's own minimum under --escalation board); power-width, pour and per-layer-width nets never do here."""
+    from fab_tiers import may_narrow
+    from net_rescue import narrow_track_width
+    from plane_pad_tap import fab_floor_clearance_track
+    config, pcb_data = state.config, state.pcb_data
+    if not nets or not may_narrow() or config.layer_widths:
+        return {}
+    _, fab_track = fab_floor_clearance_track(pcb_data)
+    plane_like = {z.net_id for z in (getattr(pcb_data, 'zones', None) or [])}
+    out = {}
+    for name, nid in nets:
+        if nid in config.power_net_widths or nid in plane_like or nid in (config.net_layer_widths or {}):
+            continue
+        nominal = config.get_net_track_width(nid, config.layers[0])
+        w = narrow_track_width(config, nid, fab_track)
+        if w < nominal - 1e-6:
+            out[nid] = (name, nominal, w)
+    return out
+
+
+def route_negotiated_narrowing(state, single_ended_nets, cancel_check=None, build_maps=None):
+    """route_negotiated with the narrow escalation (module docstring of KRT_NEGOTIATED_NARROW in narrow_round).
+    build_maps(config) -> (base map, {net: cache entry}) builds the obstacle maps for another width; without it
+    there is no narrowing. Returns (routed, rest, seconds) as route_negotiated; state.narrowed_nets =
+    {net name: [routing width, narrowed width] mm}."""
+    mode = os.environ.get('KRT_NEGOTIATED_NARROW', 'all')
+    if build_maps is None or mode in ('', '0'):
+        return route_negotiated(state, single_ended_nets, cancel_check)
+    if mode == 'round':
+        ok, rest, secs = route_negotiated(state, single_ended_nets, cancel_check)
+        widths = _narrow_widths(state, rest)
+        if not widths:
+            return ok, rest, secs
+        nets = [(n, i) for n, i in rest if i in widths]
+        keep = [(n, i) for n, i in rest if i not in widths]
+        ok2, rest2, secs2 = _narrow_round(state, nets, widths, cancel_check, build_maps)
+        return ok + ok2, keep + rest2, secs + secs2
+    t0 = time.time()
+    found = {}
+    rungs = max(1, _env_num('KRT_NEGOTIATED_NARROW_RUNGS', 3, int))
+
+    def decide(failed):
+        # renegotiate when this negotiation left a net that may narrow and is not narrowed yet
+        new = _narrow_widths(state, [(n, i) for n, i in single_ended_nets if i in set(failed) and i not in found])
+        found.update(new)
+        return bool(new)
+
+    res = route_negotiated(state, single_ended_nets, cancel_check, decide=decide)
+    rung = 0
+    while res is None:
+        rung += 1
+        if rung >= rungs:
+            # last rung: every net of the set that may narrow is narrowed, and this negotiation commits
+            found.update(_narrow_widths(state, list(single_ended_nets)))
+        print(f"Negotiated narrow escalation, rung {rung}: {len(found)} net(s) narrowed; negotiating all "
+              f"{len(single_ended_nets)} again, nothing of the previous negotiation committed")
+        res = _narrow_round(state, list(single_ended_nets), dict(found), cancel_check, build_maps,
+                            decide=None if rung >= rungs else decide)
+    ok, rest, _ = res
+    return ok, rest, time.time() - t0
+
+
+def _narrow_round(state, nets, widths, cancel_check, build_maps, decide=None):
+    """Negotiate nets with the nets of widths at their narrowed width and the rest at their own (per-net extra over
+    the narrowed base), on obstacle maps built at the narrowed width; the main pass's maps come back after and the
+    nets routed here get their entries in them rebuilt. The narrowed nets keep their width in config afterwards.
+    decide: as route_negotiated's; when it asks for another negotiation nothing is committed and None returns."""
+    from dataclasses import replace
+    from obstacle_cache import (precompute_net_obstacles, add_net_obstacles_from_cache,
+                                remove_net_obstacles_from_cache)
+    import routing_defaults as defaults
+    config, pcb_data = state.config, state.pcb_data
+    t0 = time.time()
+    floor = min(w for _, _, w in widths.values())
+    ntw = dict(config.net_track_widths or {})
+    for _, nid in nets:
+        if nid not in widths and nid not in ntw and nid not in config.power_net_widths:
+            ntw[nid] = config.get_net_track_width(nid, config.layers[0])
+    for nid, (_, _, w) in widths.items():
+        ntw[nid] = w
+    narrow = replace(config, track_width=floor, net_track_widths=ntw)
+    print(f"\nNegotiated narrow round: {len(nets)} net(s), {len(widths)} narrowed to "
+          f"{floor:g}-{max(w for _, _, w in widths.values()):g} mm (routing width {config.track_width:g} mm)")
+    # the base build writes the own-pad lift rows onto pcb_data for ITS width: the main pass's rows come back after
+    lift_keys = ('_graphic_own_pad_lift', '_graphic_own_pad_via_lift', '_net_tie_lift')
+    saved_lifts = {k: getattr(pcb_data, k) for k in lift_keys if hasattr(pcb_data, k)}
+    saved = (state.config, state.base_obstacles, state.net_obstacles_cache, state.working_obstacles)
+    routed_before = set(state.routed_net_ids)
+    t_maps = time.time()
+    try:
+        base, cache = build_maps(narrow)
+        print(f"Negotiated narrow round: obstacle maps at {floor:g} mm in {time.time() - t_maps:.1f} s")
+        # register_success updates no working map in the round (it is the main pass's, at the routing width)
+        state.config, state.base_obstacles, state.net_obstacles_cache, state.working_obstacles = narrow, base, cache, None
+        res = route_negotiated(state, nets, cancel_check, decide=decide)
+    finally:
+        state.config, state.base_obstacles, state.net_obstacles_cache, state.working_obstacles = saved
+        for k in lift_keys:
+            if k in saved_lifts:
+                setattr(pcb_data, k, saved_lifts[k])
+            elif hasattr(pcb_data, k):
+                delattr(pcb_data, k)
+    if res is None:
+        print(f"Negotiated narrow round: {time.time() - t0:.1f} s, not committed (another rung follows)")
+        return None
+    ok, rest, _ = res
+    if config.net_track_widths is None:
+        config.net_track_widths = {}
+    for nid, (_, _, w) in widths.items():
+        config.net_track_widths[nid] = w
+    state.narrowed_nets = dict(getattr(state, 'narrowed_nets', None) or {})
+    state.narrowed_nets.update({name: [round(nom, 4), round(w, 4)] for nid, (name, nom, w) in widths.items()})
+    # the nets the round routed: their entries in the main pass's cache and working map, at their own width
+    wcache = state.net_obstacles_cache
+    for nid in set(state.routed_net_ids) - routed_before:
+        if wcache is None:
+            break
+        if state.working_obstacles is not None and wcache.get(nid) is not None:
+            remove_net_obstacles_from_cache(state.working_obstacles, wcache[nid])
+        wcache[nid] = precompute_net_obstacles(pcb_data, nid, config, extra_clearance=0.0,
+                                               diagonal_margin=defaults.DIAGONAL_MARGIN)
+        if state.working_obstacles is not None:
+            add_net_obstacles_from_cache(state.working_obstacles, wcache[nid])
+    secs = time.time() - t0
+    n_w = len([1 for nid in widths if nid in set(state.routed_net_ids) - routed_before])
+    print(f"Negotiated narrow round: {ok} of {len(nets)} routed ({n_w} of {len(widths)} narrowed) in {secs:.1f} s; "
+          f"{len(rest)} left")
+    return ok, rest, secs
 
 
 def _set_params(router, config):
@@ -518,17 +650,113 @@ def _set_params(router, config):
         **({'async_mode': True} if os.environ.get('KRT_NEGOTIATED_ASYNC', '') not in ('', '0') else {}))
 
 
+def _spans_to_cells(spans, cols):
+    """(gx, y_lo, y_hi[, layer]) span rows -> (gx, gy[, layer]) cell rows, each cell once per span."""
+    spans = np.asarray(spans, dtype=np.int64).reshape(-1, cols)
+    out = [(int(r[0]), y) + ((int(r[3]),) if cols == 4 else ()) for r in spans for y in range(int(r[1]), int(r[2]) + 1)]
+    return np.ascontiguousarray(np.array(out, dtype=np.int32).reshape(-1, cols - 1))
+
+
+def _own_copper_lifts(pcb_data):
+    """{net id: (cells N x 3, via cells N x 2)}: the base-map rows a net may cross although they are hard copper to
+    every other net. Two recorded kinds, the rows the sequential router lifts per net (routing_context):
+    #908 own-pad graphics (a footprint's no-net copper touching one pad: `_graphic_own_pad_lift` cell spans and
+    `_graphic_own_pad_via_lift` via spans) and net ties (footprint net_tie_pad_groups: `_net_tie_lift` cell arrays per
+    tied net). A cell two nets claim becomes a keep-out of both (MULTI: blocked for both, as before)."""
+    out = {}
+    for nid, spans in (getattr(pcb_data, '_graphic_own_pad_lift', None) or {}).items():
+        if len(spans):
+            out.setdefault(nid, [[], []])[0].append(_spans_to_cells(spans, 4))
+    for nid, spans in (getattr(pcb_data, '_graphic_own_pad_via_lift', None) or {}).items():
+        if len(spans):
+            out.setdefault(nid, [[], []])[1].append(_spans_to_cells(spans, 3))
+    for nid, arrs in (getattr(pcb_data, '_net_tie_lift', None) or {}).items():
+        for a in arrs:
+            if len(a):
+                out.setdefault(nid, [[], []])[0].append(np.asarray(a, dtype=np.int32).reshape(-1, 3))
+    return {nid: (np.ascontiguousarray(np.concatenate(c) if c else np.zeros((0, 3), np.int32), dtype=np.int32),
+                  np.ascontiguousarray(np.concatenate(v) if v else np.zeros((0, 2), np.int32), dtype=np.int32))
+            for nid, (c, v) in out.items()}
+
+
+def _lift_removal(lifts, k):
+    """The rows to take off the base map once: per cell the largest count any one net claims. A row a footprint
+    records for two nets (a tie line touching both pads) was stamped once, so summing over nets would remove it twice
+    and free whatever else is stamped there."""
+    from collections import Counter
+    best = {}
+    for arrs in lifts.values():
+        a = arrs[k]
+        if not len(a):
+            continue
+        for key, n in Counter(map(tuple, a.tolist())).items():
+            if n > best.get(key, 0):
+                best[key] = n
+    rows = [key for key, n in best.items() for _ in range(n)]
+    return np.ascontiguousarray(np.array(rows, dtype=np.int32).reshape(-1, 3 if k == 0 else 2))
+
+
+def _tie_owned_lifts(pcb_data, lifts, coord):
+    """lifts with each cell claimed by several nets of one declared net-tie group (KiCad net_tie_pad_groups: the
+    footprint's copper is the intended conductor between those pads) owned by the nearest group pad's net alone, so
+    each tied net reaches its own pad through the tie copper and every other net stays blocked. A cell claimed by nets
+    of no common tie group stays claimed by all of them (MULTI: blocked for every net, as before)."""
+    groups = []  # (frozenset nets, [(x, y, net)])
+    for fp in (getattr(pcb_data, 'footprints', None) or {}).values():
+        if not getattr(fp, 'net_tie_groups', None):
+            continue
+        for g in fp.net_tie_groups:
+            pads = [(p.global_x, p.global_y, p.net_id) for p in fp.pads if p.pad_number in g and p.net_id]
+            nets = frozenset(n for _, _, n in pads)
+            if len(nets) > 1:
+                groups.append((nets, pads))
+    if not groups:
+        return lifts
+    out = {}
+    for k in (0, 1):
+        claims = {}
+        for nid, arrs in lifts.items():
+            for row in set(map(tuple, arrs[k].tolist())):
+                claims.setdefault(row, set()).add(nid)
+        for row, nets in claims.items():
+            if len(nets) > 1:
+                x, y = coord.to_float(row[0], row[1])
+                tie = [pads for gnets, pads in groups if nets <= gnets]
+                if tie:
+                    cand = [(((px - x) ** 2 + (py - y) ** 2), n) for px, py, n in tie[0] if n in nets]
+                    nets = {min(cand)[1]}
+            for nid in nets:
+                out.setdefault(nid, [[], []])[k].append(row)
+    return {nid: tuple(np.ascontiguousarray(np.array(r, dtype=np.int32).reshape(-1, 3 if k == 0 else 2))
+                       for k, r in enumerate(rs)) for nid, rs in out.items()}
+
+
 def _new_router(state, coord):
     """A negotiated router on the board's grid with every net's current copper as its keep-out, and the forbidden
     layers set: KRT's layer costs, a negative cost forbids tracks on that layer (route.py appends the copper layers
     the caller did not list, the plane layers, with cost -1); through vias still span it."""
     pcb_data, config = state.pcb_data, state.config
     x0, y0, w, h = grid_bounds(pcb_data, coord)
-    router = grid_router.NegotiatedRouter(state.base_obstacles, x0, y0, w, h)
+    base = state.base_obstacles
+    # the #908 rows (_graphic_own_pad_lift, _graphic_own_pad_via_lift) and the net-tie rows (_net_tie_lift)
+    lifts = _own_copper_lifts(pcb_data) if os.environ.get('KRT_NEGOTIATED_OWN_COPPER', '1') != '0' else {}
+    if lifts:
+        # the base map stamps them for every net; off a copy here, back on as the owning net's keep-out below, so
+        # they stay blocked for every other net (refcounted: copper of anything else on those cells stays)
+        base = base.clone_fresh()
+        cells, vias = _lift_removal(lifts, 0), _lift_removal(lifts, 1)
+        if len(cells):
+            base.remove_blocked_cells_batch(cells)
+        if len(vias):
+            base.remove_blocked_vias_batch(vias)
+        lifts = _tie_owned_lifts(pcb_data, lifts, coord)
+    router = grid_router.NegotiatedRouter(base, x0, y0, w, h)
     for nid, cd in (state.net_obstacles_cache or {}).items():
         cells, vias = _cache_cells_and_vias(cd)
         router.add_keepout(int(nid), np.ascontiguousarray(cells, dtype=np.int32),
                            np.ascontiguousarray(vias, dtype=np.int32))
+    for nid, (cells, vias) in lifts.items():
+        router.add_keepout(int(nid), cells, vias)
     forbidden = [c < 0 for c in config.get_layer_costs()]
     router.set_layer_forbidden(forbidden)
     return router, forbidden
@@ -564,7 +792,7 @@ def _commit_taps(state, router, taps, coord, layer_names):
 
 
 def _negotiate_and_commit(state, router, picked, rest, origs, terms_of, taps, tapped_nets, coord, layer_names,
-                          w, h, t_terms, t0):
+                          w, h, t_terms, t0, decide=None):
     pcb_data, config = state.pcb_data, state.config
     print(f"\nNegotiated main pass: {len(picked)} nets ({len(rest)} left to the sequential loop), "
           f"grid {w}x{h}x{len(layer_names)}; terminals built in {t_terms:.1f} s")
@@ -633,6 +861,8 @@ def _negotiate_and_commit(state, router, picked, rest, origs, terms_of, taps, ta
         if os.environ.get('KRT_NEGOTIATED_DEBUG_SEALED'):
             _debug_sealed(state, n, picked, origs, index, coord, layer_names)
 
+    if decide is not None and decide([nid for i, (_, nid) in enumerate(picked) if not router.paths(i)]):
+        return None   # the caller negotiates again (route_negotiated_narrowing); nothing of this one is committed
     th_cache = {}
     ok = 0
     # The commit converts paths and registers results; it edits no segment of pcb_data in place, so the

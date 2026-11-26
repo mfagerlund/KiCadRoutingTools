@@ -63,6 +63,10 @@ REGISTRY = {
     ('py_router/routing_context.py', 'build_single_ended_obstacles'): (
         LIFTS, 'clones a base for ONE net and lifts on the clone; no restore, '
                'because the clone is discarded with the route'),
+    ('py_router/negotiated.py', '_new_router'): (
+        LIFTS, 'clones the base once per negotiated run and takes every '
+               "net's own-pad and net-tie rows off it, then hands them back "
+               'as that net\'s keep-out (blocked for every other net)'),
     ('py_router/net_rescue.py', '_pristine_rescue_map'): (
         LIFTS, 'the rescue reaches neither prepare nor build_single_ended_'
                'obstacles, so the clone it hands out arrives lifted (#977; '

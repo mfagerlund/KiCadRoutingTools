@@ -208,8 +208,8 @@ def arm_a(dump):
         detected = [k for k in out if out.get(k) != probe.get(k)]
         print(f"  comparator positive control: injected 1 record into "
               f"{first[0]} -> {len(detected)} board(s) reported differing "
-              f"{'(OK)' if detected == [first[0]] else '(BLIND -- the '
-               'comparison proves nothing)'}")
+              + ('(OK)' if detected == [first[0]] else
+                 '(BLIND -- the comparison proves nothing)'))
     ok = [v for v in out.values() if 'error' not in v]
     print(f"ARM A: {len(out)} board(s), {len(ok)} graded, "
           f"{sum(v['keepouts_declared'] for v in ok)} keep-out(s) declared "

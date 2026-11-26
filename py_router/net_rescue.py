@@ -404,6 +404,23 @@ def _choose_grid(config, half_size):
     return fine
 
 
+def narrow_track_width(config, net_id, fab_track):
+    """The narrowest track a descent may give ``net_id`` (the rescue ladder, the negotiated narrow round).
+
+    Floor rule (2026-08-06): min(nominal, fab_track, netclass width) -- a
+    class-declared width is designer intent and may sit below the standard
+    fab floor (clamped at the tier floor at load; ecp5 /PF37- routes at its
+    class 0.0762 where 0.0889 is sealed). fab_track is already raised to the
+    board's own minimum under --escalation board. #530: never below the net's
+    own .kicad_dru / Board Setup minimum."""
+    nominal_w = config.get_net_track_width(net_id, config.layers[0])
+    track = min(nominal_w, fab_track, (config.netclass_width_floors or {}).get(net_id, nominal_w))
+    _rf = config.rule_floors(net_id, config.layers[0]).get('track_width')
+    if _rf:
+        track = min(nominal_w, max(track, _rf))
+    return track
+
+
 def _rescue_rungs(config, fine_grid, pcb_data, net_id):
     """The scoped retry ladder for one net (see module docstring)."""
     from plane_pad_tap import _clearance_ladder, fab_floor_clearance_track
@@ -433,18 +450,7 @@ def _rescue_rungs(config, fine_grid, pcb_data, net_id):
     except Exception:                                          # noqa: BLE001
         pass
     nominal_w = config.get_net_track_width(net_id, config.layers[0])
-    # Floor rule (2026-08-06): min(nominal, fab_track, netclass width) --
-    # a class-declared width is designer intent and may sit below the
-    # standard fab floor (clamped at the tier floor at load; ecp5 /PF37-
-    # routes at its class 0.0762 where 0.0889 is sealed). fab_track is
-    # already raised to the board's own minimum under --escalation board.
-    rescue_track = min(nominal_w, fab_track,
-                       (config.netclass_width_floors or {}).get(
-                           net_id, nominal_w))
-    # #530: never below the net's own .kicad_dru / Board Setup minimum.
-    _rf = config.rule_floors(net_id, config.layers[0]).get('track_width')
-    if _rf:
-        rescue_track = min(nominal_w, max(rescue_track, _rf))
+    rescue_track = narrow_track_width(config, net_id, fab_track)
     # #1033: the rescued net KEEPS its power width, so each rung routes it the
     # way the main router does -- at the requested width where that fits,
     # necked to the rung's floor width (track_width below) only where it

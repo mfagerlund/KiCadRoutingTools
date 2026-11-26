@@ -772,7 +772,9 @@ ROUTE_CLI_ONLY = {
 # replay routed every net), the keepout / guide-corridor layer and spacing
 # flags (controls that were never reset), and --no-fix-drc-settings (its
 # checkbox was a preference no step reset); each left when its fix landed.
-ROUTE_KNOWN_GAPS = {}
+# KNOWN GAP (c10 fork): the shared fab-tier registrar's rung hole clearance.
+_RUNG_HOLE_GAP = {'--rung-hole-clearance': "no control: the fab-tier rung hole clearance (fab_tiers.add_fab_tier_args, default KICAD_HOLE_CLEARANCE) has no GUI field, so a recorded non-default value is lost on replay. 0 recorded uses"}
+ROUTE_KNOWN_GAPS = dict(_RUNG_HOLE_GAP)
 
 # REACHED, but the control is not restored by swig_gui's
 # reset_params_to_defaults, which the plan executor runs before EVERY step: a
@@ -802,6 +804,7 @@ _SAME_AS_ROUTE = ('--debug-lines', '--debug-memory', '--enable-used-layers',
 DIFF_CLI_ONLY = {f: ROUTE_CLI_ONLY[f] for f in _SAME_AS_ROUTE}
 # KNOWN GAPS, PENDING ANDY'S DECISION (route_diff.py).
 DIFF_KNOWN_GAPS = {
+    **_RUNG_HOLE_GAP,
     '--diff-pair-centerline-setback': (
         "its control exists (differential_tab.centerline_setback, 0 = auto, "
         "which the diff tab passes as diff_pair_centerline_setback) but "
@@ -828,6 +831,7 @@ PLANES_CLI_ONLY = dict(
 # multi-net (Voronoi split) plane layer and its zone fill. 0 recorded uses of
 # any of them.
 PLANES_KNOWN_GAPS = {
+    **_RUNG_HOLE_GAP,
     '--min-thickness': "no control; planes_gui passes "
                        "defaults.PLANE_MIN_THICKNESS",
     '--plane-max-iterations': "no control; planes_gui passes "

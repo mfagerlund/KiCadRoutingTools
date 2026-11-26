@@ -304,8 +304,8 @@ def main() -> int:
         print(f"    baseline leaves {base_v} net(s) incomplete there; arms: "
               + ", ".join(f"{n} {v:+}" for n, v in sorted(dmg.items(), key=lambda kv: kv[1])))
         print("    this cell penalises any change regardless of quality "
-              f"({'DROPPED' if a.drop_rescue_clean else 'still counted -- '
-                 'pass --drop-rescue-clean to exclude'})")
+              "(" + ('DROPPED' if a.drop_rescue_clean else
+                     'still counted -- pass --drop-rescue-clean to exclude') + ")")
         if a.drop_rescue_clean:
             paired = [b for b in paired if b not in set(biased)]
     elif not have_shape:

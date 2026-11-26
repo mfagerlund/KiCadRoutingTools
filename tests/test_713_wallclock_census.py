@@ -121,6 +121,13 @@ REGISTRY = {
     'py_router/run_plan.py': (
         'harness', 'the CLI front for headless_plan; forwards its bound.'),
 
+    'py_router/negotiated.py': (
+        'reporting',
+        'elapsed seconds of the negotiated pass, its plane taps and terminal '
+        'build, printed and kept in negotiated_stats, plus the per-line wall '
+        'and CPU stamps of the KRT_NEGOTIATED_ELAPSED_LOG tee. The time limit '
+        '(KRT_NEGOTIATED_SECONDS) is enforced inside the Rust core, not here.'),
+
     # --- throttles: a clock decides only how often something PRINTS ---------
     'py_router/obstacle_map.py': (
         'throttle',

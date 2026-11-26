@@ -2727,7 +2727,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     import negotiated as _negotiated
     _sequential_nets = single_ended_nets
     if single_ended_nets and _negotiated.wanted(len(single_ended_nets)):
-        _n_ok, _sequential_nets, _n_time = _negotiated.route_negotiated(state, single_ended_nets, cancel_check)
+        def _narrow_maps(cfg):
+            # the main pass's base and per-net caches, rebuilt at the narrow round's width (copper as it now stands)
+            from obstacle_cache import precompute_net_obstacles as _pno
+            _b = build_base_obstacle_map(pcb_data, cfg, base_map_exclusions, net_clearances=net_clearances,
+                                         static_base=not env_knobs.NO_STATIC_BASE)
+            _c = {nid: _pno(pcb_data, nid, cfg, extra_clearance=0.0, diagonal_margin=defaults.DIAGONAL_MARGIN)
+                  for nid in (state.net_obstacles_cache or {})}
+            return _b, _c
+        _n_ok, _sequential_nets, _n_time = _negotiated.route_negotiated_narrowing(
+            state, single_ended_nets, cancel_check, build_maps=_narrow_maps)
         if os.environ.get('KRT_NEGOTIATED_NO_FALLBACK', '') not in ('', '0'):   # measurement: the negotiated pass alone
             _sequential_nets = []
         successful += _n_ok
@@ -4404,6 +4413,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         # Terminal geometry escalation outcome per net: "recovered at WxS/D"
         # or "unrecovered" (key absent when nothing was attempted).
         summary['terminal_escalations'] = terminal_escalation_summary['nets']
+    if getattr(state, 'narrowed_nets', None):
+        # Negotiated narrow round: {net: [routing width, narrowed width]} (key absent when nothing was narrowed).
+        summary['narrowed_nets'] = state.narrowed_nets
     if _pe_outcomes:
         # Main-pass pre-existing rips (0805): {victim net: outcome}. Key
         # absent when no pre-existing net was ripped.

@@ -33,3 +33,58 @@ def test_env_default(monkeypatch):
     assert ft._hole_clearance_default() is None
     monkeypatch.delenv('KICAD_HOLE_CLEARANCE')
     assert ft._hole_clearance_default() is None
+
+
+if __name__ == '__main__':
+    # run_all.py runs each test file as a script; without this block it defined its tests and ran none (#718).
+    # pytest's monkeypatch fixture comes from the stdlib, so pytest stays optional.
+    import inspect
+    import os as _os
+    import traceback
+
+    class _MonkeyPatch:
+        """The fixture methods these tests use (setattr, setenv, delenv), undone after each test."""
+
+        def __init__(self):
+            self._undo = []
+
+        def setattr(self, target, name, value):
+            self._undo.append((target, name, getattr(target, name)))
+            setattr(target, name, value)
+
+        def setenv(self, name, value):
+            self._undo.append((None, name, _os.environ.get(name)))
+            _os.environ[name] = str(value)
+
+        def delenv(self, name, raising=True):
+            self._undo.append((None, name, _os.environ.get(name)))
+            if raising:
+                del _os.environ[name]
+            else:
+                _os.environ.pop(name, None)
+
+        def undo(self):
+            for target, name, value in reversed(self._undo):
+                if target is not None:
+                    setattr(target, name, value)
+                elif value is None:
+                    _os.environ.pop(name, None)
+                else:
+                    _os.environ[name] = value
+
+    tests = [(n, f) for n, f in globals().items() if n.startswith('test_') and inspect.isfunction(f)]
+    failed = []
+    for name, fn in tests:
+        mp = _MonkeyPatch()
+        kwargs = {'monkeypatch': mp} if 'monkeypatch' in inspect.signature(fn).parameters else {}
+        try:
+            fn(**kwargs)
+            print(f'  PASS  {name}')
+        except Exception:                                  # noqa: BLE001
+            failed.append(name)
+            print(f'  FAIL  {name}')
+            traceback.print_exc()
+        finally:
+            mp.undo()
+    print(f'{len(tests) - len(failed)}/{len(tests)} passed')
+    sys.exit(1 if failed or not tests else 0)
