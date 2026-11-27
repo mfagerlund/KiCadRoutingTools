@@ -176,10 +176,10 @@ def run_reroute_loop(
                     and not rip_refusal(pcb_data, _o, "victim-priority restore")
                     for _o in _owners0):
                 continue
-            # Never trade a bigger net for a smaller one: a squatter with
-            # more pads than the victim can come back partial and lose more
-            # connections than the restore gains.
-            if outweighing_squatters(pcb_data, _vid, _owners0):
+            # Never trade a bigger net for a smaller one: a squatter that
+            # can lose more connections (coming back partial) than the
+            # restore gains across all the victim's legs is not ripped.
+            if outweighing_squatters(pcb_data, _own0, _owners0):
                 continue
             state.victim_authority_used.add(_vid)
             _vname = (pcb_data.nets[_vid].name

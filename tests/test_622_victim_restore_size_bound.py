@@ -7,7 +7,8 @@ Measured on one card: a 2-pad victim's restore ripped a 19-pad power tree
 routed as signal copper, which came back with 17 of its connections open,
 so the board shipped 12 more opens than without the restore.
 
-Rule: a squatter with more pads than the victim is never ripped for it.
+Rule: a squatter whose possible loss (its pads - 1) exceeds the restore's
+gain (sum over the victim's legs of leg pads - 1) is never ripped for it.
 Equal or smaller squatters are still ripped, so the motivating class
 (victims held by their own small rippers) is unchanged.
 """
@@ -57,6 +58,15 @@ def t_unknown_victim_refuses_any_padded_squatter():
           f"got {got}")
 
 
+def t_pair_victim_counts_both_legs():
+    # A 4-pad pair (2 pads per leg) gains 2 connections; a 3-pad squatter
+    # loses at most 2, so it is bounded. Counting one leg would refuse it.
+    from rip_restore import outweighing_squatters
+    pcb = _board({1: 2, 2: 2, 3: 3, 4: 4})
+    got = outweighing_squatters(pcb, {1, 2}, {3, 4})
+    check('t_pair_victim_counts_both_legs', got == [4], f"got {got}")
+
+
 def t_sweep_consults_the_bound():
     path = os.path.join(os.path.dirname(__file__), '..', 'py_router',
                         'reroute_loop.py')
@@ -75,6 +85,7 @@ if __name__ == '__main__':
     t_bigger_squatter_refused()
     t_equal_and_smaller_allowed()
     t_unknown_victim_refuses_any_padded_squatter()
+    t_pair_victim_counts_both_legs()
     t_sweep_consults_the_bound()
     if FAILS:
         print(f"FAILED: {FAILS}")

@@ -174,20 +174,26 @@ def conflict_owner_ids(pcb_data: PCBData, config: GridRouteConfig,
                            collect=True)
 
 
-def outweighing_squatters(pcb_data: PCBData, victim_id: int,
+def outweighing_squatters(pcb_data: PCBData, victim_ids,
                           owner_ids) -> list:
-    """Squatters bigger than the victim they would be ripped for.
+    """Squatters that could each lose more than the victim's restore gains.
 
     The victim-priority restore rips a squatter and requeues it; when the
     squatter comes back partial, it can lose up to (its pads - 1)
-    connections, while the restore gains at most (victim pads - 1). A
-    squatter with more pads than the victim can therefore lose more than
-    the restore buys, so it is never ripped for it. Returns the offending
-    owner ids, sorted; empty means the trade is bounded.
+    connections, while the restore gains at most the sum of (leg pads - 1)
+    over the victim's legs (one leg for a single net, P and N for a pair).
+    A squatter whose possible loss exceeds that gain is never ripped for
+    it. The bound is per squatter (the sweep rips at most a few small
+    owners); it does not sum the losses. ``victim_ids`` is one net id or
+    an iterable of the legs. Returns the offending owner ids, sorted;
+    empty means every squatter on its own is bounded by the gain.
     """
     pbn = getattr(pcb_data, 'pads_by_net', None) or {}
-    n_victim = len(pbn.get(victim_id, ()))
-    return sorted(o for o in owner_ids if len(pbn.get(o, ())) > n_victim)
+    legs = ({victim_ids} if isinstance(victim_ids, int)
+            else set(victim_ids))
+    gain = sum(max(0, len(pbn.get(v, ())) - 1) for v in legs)
+    return sorted(o for o in owner_ids
+                  if len(pbn.get(o, ())) - 1 > gain)
 
 
 def _stub_subset(pcb_data: PCBData, net_id: int, segments, vias,
