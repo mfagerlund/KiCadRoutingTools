@@ -4788,11 +4788,17 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # We use object identity since segments are mutable and could be duplicated
     # Keep the objects alive alongside the id set: recycled ids of GC'd
     # originals otherwise alias NEW segments during sync (see route_diff, #195).
-    _original_segments_keepalive = list(pcb_data.segments)
+    # Fine-escape reservations sit in pcb_data but are not input copper: a
+    # restore would otherwise keep a ripped route's stubs off the write-list.
+    from fine_escape import reserved_copper as _fe_reserved
+    _fe_seg_ids, _fe_via_ids = _fe_reserved(pcb_data)
+    _original_segments_keepalive = [s for s in pcb_data.segments
+                                    if id(s) not in _fe_seg_ids]
     original_segment_ids = set(id(s) for s in _original_segments_keepalive)
     # #874: vias need the same snapshot, for the same reason -- sync must be
     # able to tell an input-file via from a superseded routed one.
-    _original_vias_keepalive = list(pcb_data.vias)
+    _original_vias_keepalive = [v for v in pcb_data.vias
+                                if id(v) not in _fe_via_ids]
     original_via_ids = set(id(v) for v in _original_vias_keepalive)
 
     # Get unrouted nets for stub proximity costs

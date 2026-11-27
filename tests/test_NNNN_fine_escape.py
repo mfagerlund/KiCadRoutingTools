@@ -164,8 +164,14 @@ def check_reservation(d):
     on_board = lambda segs: sum(any(s is t for t in pcb.segments) for s in segs)
     if nres != 8 or any(on_board(v) != len(v) for v in st.pending.values()):
         errs.append(f"reservation: {nres} net(s) reserved, want 8, all on the board")
+    seg_ids, _ = fe.reserved_copper(pcb)
+    want = {id(s) for v in st.pending.values() for s in v}
+    if not want or seg_ids != want:
+        errs.append("reservation: reserved_copper does not name the reserved stubs, "
+                    "so the run's input snapshot would count them as input copper")
     a, b = sorted(st.pending)[:2]
     sa = list(st.pending[a])
+    sb = list(st.pending[b])
     tok = fe.begin(pcb, a, cfg)
     fe.finish(pcb, tok, {'failed': True})
     if st.pending.get(a) != sa or on_board(sa) != len(sa):
@@ -174,8 +180,13 @@ def check_reservation(d):
     res = fe.finish(pcb, tok, {'new_segments': [], 'new_vias': []})
     if a in st.pending or on_board(sa) or res['new_segments'] != sa:
         errs.append("reservation: a successful route did not take its stubs")
+    tok = fe.begin(pcb, b, cfg)  # left open, as an exception would
+    if fe.reserved_copper(pcb)[0] < {id(s) for s in sb}:
+        errs.append("reservation: an open bracket's stubs left reserved_copper")
     with contextlib.redirect_stdout(io.StringIO()):
         fe.release(pcb)
+    if st.live is not None or on_board(sb):
+        errs.append("reservation: release left an open bracket's stubs on the board")
     left = [s for s in pcb.segments if s.net_id in ids]
     if st.pending or left:
         errs.append(f"reservation: {len(left)} stub segment(s) left after release")
@@ -237,6 +248,19 @@ def check_routing(d, y_off):
     return errs
 
 
+def check_snapshot_excludes_reservations():
+    """batch_route's input-copper snapshot must leave the reservations out."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..',
+                        'py_router', 'route.py')
+    with open(path, encoding='utf-8') as f:
+        src = f.read()
+    i = src.find('_original_segments_keepalive =')
+    ok = i > 0 and 'reserved_copper' in src[max(0, i - 600):i]
+    print(f"  snapshot leaves reservations out: {'ok' if ok else 'NO'}")
+    return [] if ok else ["snapshot: route.py's input snapshot does not consult "
+                          "fine_escape.reserved_copper"]
+
+
 def check_opt_in():
     import env_knobs
     saved = os.environ.pop('KICAD_FINE_ESCAPE', None)
@@ -262,7 +286,8 @@ def check_opt_in():
 def main():
     d = tempfile.mkdtemp(prefix='tNNNN_fe_')
     try:
-        errs = (check_opt_in() + check_detection(d) + check_foreign_neighbour(d)
+        errs = (check_opt_in() + check_snapshot_excludes_reservations()
+                + check_detection(d) + check_foreign_neighbour(d)
                 + check_corner_pads(d)
                 + check_reservation(d) + check_routing(d, 0.0)
                 + check_routing(d, 0.05))

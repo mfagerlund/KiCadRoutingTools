@@ -393,6 +393,33 @@ def _drop(pcb_data, segs):
     bump_copper_epoch(pcb_data)
 
 
+def reserved_copper(pcb_data):
+    """The copper the prepass reserved and has not handed to a route yet:
+    (segment ids, via ids). It sits in pcb_data but is not input-file copper,
+    so the run's "copper we were handed" snapshot must leave it out, or a
+    restore keeps a ripped route's stubs off the write-list."""
+    st = getattr(pcb_data, _STATE, None)
+    if st is None:
+        return set(), set()
+    groups = list(st.pending.values())
+    if st.live is not None:
+        groups.append(st.live[1])
+    return {id(s) for g in groups for s in g}, set()
+
+
+def _close_live(pcb_data, st):
+    """Close a bracket an exception left open: adopted stubs go back to
+    pending, fresh ones come off the board."""
+    if st.live is None:
+        return
+    nid, segs, adopted = st.live
+    if adopted:
+        st.pending[nid] = segs
+    else:
+        _drop(pcb_data, segs)
+    st.live = None
+
+
 def begin(pcb_data, net_id, config):
     """Open the bracket around one route of `net_id`: adopt its reserved
     stubs, or lay fresh ones against the copper present now. The stubs sit
@@ -401,13 +428,7 @@ def begin(pcb_data, net_id, config):
     st = getattr(pcb_data, _STATE, None)
     if st is None:
         return None
-    if st.live is not None:  # a bracket an exception left open
-        nid, segs, adopted = st.live
-        if adopted:
-            st.pending[nid] = segs
-        else:
-            _drop(pcb_data, segs)
-        st.live = None
+    _close_live(pcb_data, st)
     if net_id not in st.nets:
         return None
     if net_id in st.pending:
@@ -451,7 +472,10 @@ def release(pcb_data, working_obstacles=None, net_obstacles_cache=None,
     routed off the board, so no stub ships as unconnected copper and later
     passes see the pads bare. Returns the number of nets released."""
     st = getattr(pcb_data, _STATE, None)
-    if st is None or not st.pending:
+    if st is None:
+        return 0
+    _close_live(pcb_data, st)
+    if not st.pending:
         return 0
     nids = sorted(st.pending)
     for nid in nids:
