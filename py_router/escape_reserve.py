@@ -82,6 +82,33 @@ def _seg_seg(a, b, c, d):
                _pt_seg(*c, *a, *b), _pt_seg(*d, *a, *b))
 
 
+def _in_poly(x, y, poly):
+    inside = False
+    j = len(poly) - 1
+    for i in range(len(poly)):
+        (xi, yi), (xj, yj) = poly[i], poly[j]
+        if (yi > y) != (yj > y) and x < (xj - xi) * (y - yi) / (yj - yi) + xi:
+            inside = not inside
+        j = i
+    return inside
+
+
+def _poly_near(a, b, r, poly):
+    """Segment a-b (a point when a == b) inside `poly` or within r of its edge."""
+    if _in_poly(a[0], a[1], poly) or _in_poly(b[0], b[1], poly):
+        return True
+    return any(_seg_seg(a, b, poly[i - 1], poly[i]) < r - 1e-9
+               for i in range(len(poly)))
+
+
+def _ko_on(ko, layer):
+    """Does keep-out `ko` cover copper layer `layer` (None = any layer)?"""
+    kl = ko.get('layers') or set()
+    if not kl or layer is None or '*.Cu' in kl or layer in kl:
+        return True
+    return layer in ('F.Cu', 'B.Cu') and bool({'F&B.Cu', 'F&B'} & set(kl))
+
+
 def _seg_box(a, b, cx, cy, hx, hy):
     if _pt_box(*a, cx, cy, hx, hy) == 0.0 or _pt_box(*b, cx, cy, hx, hy) == 0.0:
         return 0.0
@@ -129,8 +156,22 @@ class _Board:
         self.vias = list(pcb_data.vias)        # (other nets filtered per test)
         self.segs = list(pcb_data.segments)
         self.planned = []                       # copper planned in this run
-        bb = pcb_data.board_info.board_bounds if pcb_data.board_info else None
+        bi = pcb_data.board_info
+        bb = bi.board_bounds if bi else None
         self.bounds = bb
+        # The board's own rules the router enforces on its copper: keep-out
+        # rule areas, the real outline and its cutouts (not only the box).
+        self.keepouts = [k for k in (getattr(bi, 'keepouts', None) or [])
+                         if len(k.get('polygon') or []) >= 3
+                         and not (k.get('tracks_allowed', True)
+                                  and k.get('vias_allowed', True))]
+        outs = list(getattr(bi, 'board_outlines', None) or [])
+        if not outs and getattr(bi, 'board_outline', None):
+            outs = [bi.board_outline]
+        self.outlines = [o for o in outs if len(o) >= 3]
+        self.cutouts = [c for c in (getattr(bi, 'board_cutouts', None) or [])
+                        if len(c) >= 3]
+        self._nclr = {}
         self.edge = config.board_edge_clearance or config.clearance
         # The board's copper-to-HOLE floor (min_hole_clearance): a new via's
         # drill is held that far off every other net's copper, which binds
@@ -150,6 +191,38 @@ class _Board:
     def _near(self, items, x, y, span, key):
         return [o for o in items if abs(key(o)[0] - x) <= span and abs(key(o)[1] - y) <= span]
 
+    def _clr(self, net_id, clr):
+        """Clearance between this copper and net `net_id`'s: the larger of
+        the two nets' clearances (KiCad grades a pair at the larger)."""
+        c = self._nclr.get(net_id)
+        if c is None:
+            c = self._nclr[net_id] = self.cfg.get_net_clearance(net_id)
+        return c if c > clr else clr
+
+    def _off_rules(self, a, b, r, layer, via):
+        """Copper a-b of half-width r (a via: a == b, layer None) breaks a
+        keep-out, leaves the outline or enters a cutout."""
+        for ko in self.keepouts:
+            if via and ko.get('vias_allowed', True):
+                continue
+            if not via and (ko.get('tracks_allowed', True) or not _ko_on(ko, layer)):
+                continue
+            if _poly_near(a, b, r, ko['polygon']):
+                return True
+        m = r + self.edge
+        for c in self.cutouts:
+            if _poly_near(a, b, m, c):
+                return True
+        if self.outlines:
+            inside = [o for o in self.outlines
+                      if _in_poly(a[0], a[1], o) and _in_poly(b[0], b[1], o)]
+            if not inside:
+                return True
+            if all(any(_seg_seg(a, b, o[i - 1], o[i]) < m - 1e-9
+                       for i in range(len(o))) for o in inside):
+                return True
+        return False
+
     def via_ok(self, net_id, x, y, clr):
         cfg = self.cfg
         vr, dr = cfg.via_size / 2, cfg.via_drill / 2
@@ -158,6 +231,8 @@ class _Board:
             m = vr + self.edge
             if x < x0 + m or x > x1 - m or y < y0 + m or y > y1 - m:
                 return False
+        if self._off_rules((x, y), (x, y), vr, None, True):
+            return False
         span = 3.0
         h2h = cfg.hole_to_hole_clearance
         for q in self.pads:
@@ -171,7 +246,8 @@ class _Board:
                 continue
             if not any(l in cfg.layers or l == '*.Cu' for l in q.layers):
                 continue
-            need = self._hole_need(vr + clr, self.cfg.via_hole_extra(clr, pad=q))
+            qc = self._clr(q.net_id, clr)
+            need = self._hole_need(vr + qc, self.cfg.via_hole_extra(qc, pad=q))
             if _pad_dist_pt(q, x, y) < need - 1e-9:
                 return False
         for v in self.vias + [o for o in self.planned if o[0] == 'via']:
@@ -184,7 +260,7 @@ class _Board:
                 return False
             # Another net's via: ring to ring at clearance, and each drill
             # off the other's ring at the hole floor.
-            if vnet != net_id and d < max(vr + vsize / 2 + clr,
+            if vnet != net_id and d < max(vr + vsize / 2 + self._clr(vnet, clr),
                                           dr + vsize / 2 + self.hole,
                                           vr + vdrill / 2 + self.hole) - 1e-9:
                 return False
@@ -199,13 +275,16 @@ class _Board:
             if (min(a[0], b[0]) > x + span or max(a[0], b[0]) < x - span
                     or min(a[1], b[1]) > y + span or max(a[1], b[1]) < y - span):
                 continue
-            need = self._hole_need(vr + clr, self.cfg.via_hole_extra(clr))
+            sc = self._clr(snet, clr)
+            need = self._hole_need(vr + sc, self.cfg.via_hole_extra(sc))
             if _pt_seg(x, y, *a, *b) < need + w / 2 - 1e-9:
                 return False
         return True
 
     def stub_ok(self, net_id, a, b, w, layer, clr, own_pad):
         hw = w / 2
+        if self._off_rules(a, b, hw, layer, False):
+            return False
         span = 3.0 + math.hypot(b[0] - a[0], b[1] - a[1])
         for q in self.pads:
             if q is own_pad or q.net_id == net_id or not fe._on_layer(q, layer):
@@ -213,14 +292,14 @@ class _Board:
             hx, hy = fe._half_extents(q)
             if abs(q.global_x - a[0]) > span + hx or abs(q.global_y - a[1]) > span + hy:
                 continue
-            if _pad_dist_seg(q, a, b) < hw + clr - 1e-9:
+            if _pad_dist_seg(q, a, b) < hw + self._clr(q.net_id, clr) - 1e-9:
                 return False
         for v in self.vias + [o for o in self.planned if o[0] == 'via']:
             vx, vy, vsize, _, vnet = (v.x, v.y, v.size, v.drill, v.net_id) \
                 if not isinstance(v, tuple) else v[1:]
             if vnet == net_id or abs(vx - a[0]) > span or abs(vy - a[1]) > span:
                 continue
-            if _pt_seg(vx, vy, *a, *b) < vsize / 2 + hw + clr - 1e-9:
+            if _pt_seg(vx, vy, *a, *b) < vsize / 2 + hw + self._clr(vnet, clr) - 1e-9:
                 return False
         for s in self.segs + [o for o in self.planned if o[0] == 'seg']:
             if isinstance(s, tuple):
@@ -233,7 +312,7 @@ class _Board:
             if (min(c[0], d[0]) > a[0] + span or max(c[0], d[0]) < a[0] - span
                     or min(c[1], d[1]) > a[1] + span or max(c[1], d[1]) < a[1] - span):
                 continue
-            if _seg_seg(a, b, c, d) < hw + sw / 2 + clr - 1e-9:
+            if _seg_seg(a, b, c, d) < hw + sw / 2 + self._clr(snet, clr) - 1e-9:
                 return False
         return True
 
