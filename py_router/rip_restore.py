@@ -174,6 +174,22 @@ def conflict_owner_ids(pcb_data: PCBData, config: GridRouteConfig,
                            collect=True)
 
 
+def outweighing_squatters(pcb_data: PCBData, victim_id: int,
+                          owner_ids) -> list:
+    """Squatters bigger than the victim they would be ripped for.
+
+    The victim-priority restore rips a squatter and requeues it; when the
+    squatter comes back partial, it can lose up to (its pads - 1)
+    connections, while the restore gains at most (victim pads - 1). A
+    squatter with more pads than the victim can therefore lose more than
+    the restore buys, so it is never ripped for it. Returns the offending
+    owner ids, sorted; empty means the trade is bounded.
+    """
+    pbn = getattr(pcb_data, 'pads_by_net', None) or {}
+    n_victim = len(pbn.get(victim_id, ()))
+    return sorted(o for o in owner_ids if len(pbn.get(o, ())) > n_victim)
+
+
 def _stub_subset(pcb_data: PCBData, net_id: int, segments, vias,
                  max_len_mm: float = 2.0):
     """The escape-stub portion of the saved copper: short segments starting
