@@ -132,7 +132,8 @@ def run_reroute_loop(
     def _victim_priority_sweep622() -> bool:
         nonlocal successful
         import env_knobs as _ek622
-        from rip_restore import try_terminal_restore, conflict_owner_ids
+        from rip_restore import (try_terminal_restore, conflict_owner_ids,
+                                 outweighing_squatters)
         from obstacle_cache import (add_net_obstacles_from_cache,
                                     precompute_net_obstacles,
                                     remove_net_obstacles_from_cache)
@@ -174,6 +175,11 @@ def run_reroute_loop(
                     and _o not in diff_pair_by_net_id
                     and not rip_refusal(pcb_data, _o, "victim-priority restore")
                     for _o in _owners0):
+                continue
+            # Never trade a bigger net for a smaller one: a squatter with
+            # more pads than the victim can come back partial and lose more
+            # connections than the restore gains.
+            if outweighing_squatters(pcb_data, _vid, _owners0):
                 continue
             state.victim_authority_used.add(_vid)
             _vname = (pcb_data.nets[_vid].name
