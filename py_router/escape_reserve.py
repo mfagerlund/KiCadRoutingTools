@@ -131,6 +131,20 @@ class _Board:
         bb = pcb_data.board_info.board_bounds if pcb_data.board_info else None
         self.bounds = bb
         self.edge = config.board_edge_clearance or config.clearance
+        # The board's copper-to-HOLE floor (min_hole_clearance): a new via's
+        # drill is held that far off every other net's copper, which binds
+        # over ring + clearance when the drill is large against the ring.
+        try:
+            from obstacle_map import resolve_hole_clearance
+            self.hole = float(resolve_hole_clearance(pcb_data, config) or 0.0)
+        except Exception:
+            self.hole = float(getattr(config, 'hole_clearance', 0.0) or 0.0)
+
+    def _hole_need(self, ring_need, extra=0.0):
+        """Centre distance a new via keeps from other-net copper: the ring
+        at `ring_need`, or the drill at the hole floor, whichever is more."""
+        dr = self.cfg.via_drill / 2
+        return max(ring_need + extra, dr + self.hole)
 
     def _near(self, items, x, y, span, key):
         return [o for o in items if abs(key(o)[0] - x) <= span and abs(key(o)[1] - y) <= span]
@@ -155,7 +169,8 @@ class _Board:
                 continue
             if not any(l in cfg.layers or l == '*.Cu' for l in q.layers):
                 continue
-            if _pad_dist_pt(q, x, y) < vr + clr - 1e-9:
+            need = self._hole_need(vr + clr, self.cfg.via_hole_extra(clr, pad=q))
+            if _pad_dist_pt(q, x, y) < need - 1e-9:
                 return False
         for v in self.vias + [o for o in self.planned if o[0] == 'via']:
             vx, vy, vsize, vdrill, vnet = (v.x, v.y, v.size, v.drill, v.net_id) \
@@ -165,7 +180,11 @@ class _Board:
             d = math.hypot(vx - x, vy - y)
             if d < dr + vdrill / 2 + h2h - 1e-9:
                 return False
-            if vnet != net_id and d < vr + vsize / 2 + clr - 1e-9:
+            # Another net's via: ring to ring at clearance, and each drill
+            # off the other's ring at the hole floor.
+            if vnet != net_id and d < max(vr + vsize / 2 + clr,
+                                          dr + vsize / 2 + self.hole,
+                                          vr + vdrill / 2 + self.hole) - 1e-9:
                 return False
         for s in self.segs + [o for o in self.planned if o[0] == 'seg']:
             if isinstance(s, tuple):
@@ -178,7 +197,8 @@ class _Board:
             if (min(a[0], b[0]) > x + span or max(a[0], b[0]) < x - span
                     or min(a[1], b[1]) > y + span or max(a[1], b[1]) < y - span):
                 continue
-            if _pt_seg(x, y, *a, *b) < vr + w / 2 + clr - 1e-9:
+            need = self._hole_need(vr + clr, self.cfg.via_hole_extra(clr))
+            if _pt_seg(x, y, *a, *b) < need + w / 2 - 1e-9:
                 return False
         return True
 
@@ -278,6 +298,28 @@ def _needs_via(pcb_data, p, layer, zones, local_mm):
                                q.global_y - p.global_y) <= local_mm):
             return False
     return True
+
+
+def _flanked(p, pads, zones):
+    """True when p's two row neighbours (the nearest pads, on opposite sides)
+    both belong to one other net with no pour: that net joins its pins along
+    the row edge (a pour net drops to its plane instead), walling p in
+    unless p's exit is reserved first."""
+    others = [q for q in pads if q is not p and not (getattr(q, 'drill', 0) or 0) > 0]
+    if len(others) < 2:
+        return False
+    d = lambda q: math.hypot(q.global_x - p.global_x, q.global_y - p.global_y)
+    pitch = min(d(q) for q in others)
+    near = [q for q in others if d(q) <= pitch * 1.05]
+    if len(near) != 2:
+        return False
+    a, b = near
+    if (a.net_id != b.net_id or not a.net_id or a.net_id == p.net_id
+            or a.net_id in zones):
+        return False
+    dot = ((a.global_x - p.global_x) * (b.global_x - p.global_x)
+           + (a.global_y - p.global_y) * (b.global_y - p.global_y))
+    return dot < 0
 
 
 def _dest(pcb_data, p):
@@ -477,8 +519,10 @@ def _commit(board, config, planned, p, via, pts, layer, w):
     planned.setdefault(p.net_id, []).append((p, via, pts, layer, w))
 
 
-def plan(pcb_data, config, net_ids, by_fp=None, only_pads=None, verbose=False):
-    """Plan dog-bones for the fine pins of `net_ids`. Returns
+def plan(pcb_data, config, net_ids, by_fp=None, only_pads=None, verbose=False,
+         weak=()):
+    """Plan dog-bones for the fine pins of `net_ids`; pins of `weak` nets
+    only when flanked (`_flanked`). Returns
     ({net_id: [(pad, via_xy, [stub points], layer, width)]}, [pins with no
     legal site]). `only_pads` limits the plan to those pads (a single net
     re-planned against the copper present now)."""
@@ -502,8 +546,11 @@ def plan(pcb_data, config, net_ids, by_fp=None, only_pads=None, verbose=False):
             if not bga and only_pads is None and p.net_id in planned:
                 continue
             layer = next(l for l in p.layers if l in config.layers)
-            if not bga and not _needs_via(pcb_data, p, layer, zones, local_mm):
-                continue
+            if not bga and not _flanked(p, pads, zones):
+                if p.net_id in weak:
+                    continue
+                if not _needs_via(pcb_data, p, layer, zones, local_mm):
+                    continue
             w = config.get_net_track_width(p.net_id, layer)
             clr = config.get_net_clearance(p.net_id)
             jobs.append((p, layer, w, clr, _dest(pcb_data, p)))
@@ -620,13 +667,15 @@ def escape_reserve_prepass(pcb_data, config, net_ids, net_clearances=None,
     names = {p.net_id: p.net_name for ps in pcb_data.pads_by_net.values() for p in ps}
     # A power-like net with no pour has no plane to drop into: its pins route
     # like signals, and a reservation it fails to use only blocks neighbours.
-    nozone = sorted({names.get(n) or '' for n in net_ids
-                     if n not in zones and POWER_NAME.match(names.get(n) or '')})
-    net_ids = [n for n in net_ids
-               if n in zones or not POWER_NAME.match(names.get(n) or '')]
-    fines = _fine_pins(pcb_data, config, net_ids, st.by_fp)
-    nets = {p.net_id for _, _, fine, _ in fines for p in fine}
-    planned, unplaced = plan(pcb_data, config, net_ids, st.by_fp, verbose=verbose)
+    # Exception: a pin walled in by its row neighbours keeps its reservation.
+    weak = {n for n in net_ids
+            if n not in zones and POWER_NAME.match(names.get(n) or '')}
+    nozone = sorted({names.get(n) or '' for n in weak})
+    fines = _fine_pins(pcb_data, config, [n for n in net_ids if n not in weak],
+                       st.by_fp)
+    planned, unplaced = plan(pcb_data, config, net_ids, st.by_fp, verbose=verbose,
+                             weak=weak)
+    nets = {p.net_id for _, _, fine, _ in fines for p in fine} | set(planned)
     n_pins = sum(len(v) for v in planned.values())
     laid = 0
     for nid in sorted(planned):
