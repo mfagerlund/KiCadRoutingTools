@@ -515,6 +515,27 @@ def _legal(board, p, via, pts, w, clr, layer):
     return True
 
 
+def _pick(board, pcb_data, config, p, cands, w, clr, layer, neck):
+    """(via, stub points, width) of the first legal candidate at the net's
+    width `w`; with `neck` (KICAD_ESCAPE_NECK) and none legal, the first
+    legal one at fe.escape_neck_width -- the stub alone is necked, the via
+    and everything the main pass lays from it keep the net's sizes. None
+    when neither fits."""
+    cands = list(cands)
+    for _, v, pts in cands:
+        if _legal(board, p, v, pts, w, clr, layer):
+            return v, pts, w
+    nw = fe.escape_neck_width(config, p.net_id, layer, pcb_data) if neck else None
+    if nw is None:
+        return None
+    for _, v, pts in cands:
+        if _legal(board, p, v, pts, nw, clr, layer):
+            print(f"Escape neck: {p.component_ref}.{p.pad_number} ({p.net_name}) "
+                  f"stub at {nw:.4f}mm (net {w:.4f}mm)")
+            return v, pts, nw
+    return None
+
+
 def _commit(board, config, planned, p, via, pts, layer, w):
     board.planned.append(('via', via[0], via[1], config.via_size,
                           config.via_drill, p.net_id))
@@ -530,8 +551,10 @@ def plan(pcb_data, config, net_ids, by_fp=None, only_pads=None, verbose=False,
     ({net_id: [(pad, via_xy, [stub points], layer, width)]}, [pins with no
     legal site]). `only_pads` limits the plan to those pads (a single net
     re-planned against the copper present now)."""
+    import env_knobs
     by_fp = by_fp if by_fp is not None else fe._footprints(pcb_data)
     board = _Board(pcb_data, config)
+    neck = bool(env_knobs.ESCAPE_NECK)
     planned, unplaced = {}, []
     parts = _fine_pins(pcb_data, config, net_ids, by_fp)
     zones = _zone_nets(pcb_data)
@@ -564,12 +587,12 @@ def plan(pcb_data, config, net_ids, by_fp=None, only_pads=None, verbose=False,
             # innermost balls first: they have the fewest ways out
             jobs.sort(key=lambda j: math.hypot(j[0].global_x - cx, j[0].global_y - cy))
             for p, layer, w, clr, dest in jobs:
-                pick = next(((v, pts) for _, v, pts in _bga_cands(p, pads, config, dest)
-                             if _legal(board, p, v, pts, w, clr, layer)), None)
+                pick = _pick(board, pcb_data, config, p,
+                             _bga_cands(p, pads, config, dest), w, clr, layer, neck)
                 if pick is None:
                     unplaced.append(p)
                 else:
-                    _commit(board, config, planned, p, pick[0], pick[1], layer, w)
+                    _commit(board, config, planned, p, pick[0], pick[1], layer, pick[2])
             continue
         rows = {}
         for j in jobs:
@@ -611,12 +634,12 @@ def plan(pcb_data, config, net_ids, by_fp=None, only_pads=None, verbose=False,
                 rest.append((j, geo))
             for j, geo in rest:
                 p, layer, w, clr, dest = j
-                pick = next(((v, pts) for _, v, pts in _single_cands(p, geo, config, dest)
-                             if _legal(board, p, v, pts, w, clr, layer)), None)
+                pick = _pick(board, pcb_data, config, p,
+                             _single_cands(p, geo, config, dest), w, clr, layer, neck)
                 if pick is None:
                     unplaced.append(p)
                 else:
-                    _commit(board, config, planned, p, pick[0], pick[1], layer, w)
+                    _commit(board, config, planned, p, pick[0], pick[1], layer, pick[2])
     return planned, unplaced
 
 

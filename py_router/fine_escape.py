@@ -42,6 +42,28 @@ ELONGATED = 1.5  # long/short half-extent ratio that fixes a pad's exit axis
 _STATE = '_fine_escape_state'
 
 
+def _escape_rule_min(config, net_id, layer):
+    """The track_width minimum KiCad's DRC holds `net_id` to on `layer`
+    (.kicad_dru rule / Board Setup minimum), 0.0 when none binds: a neck
+    never ships copper a DRC run on the board's own rules would flag."""
+    v = (config.rule_floors(net_id, layer) or {}).get('track_width')
+    return float(v or 0.0)
+
+
+def escape_neck_width(config, net_id, layer, pcb_data):
+    """KICAD_ESCAPE_NECK: the width a pad-escape neck of `net_id` is laid at
+    on `layer` -- the wider of the fab tier's nominal track floor and the
+    net's rule minimum there. None when that is not narrower than the net's
+    own width (nothing to gain)."""
+    from fab_tiers import fab_floors
+    n = len(getattr(pcb_data.board_info, 'copper_layers', None) or []) or 2
+    fab = float(fab_floors(n).get('track_width') or 0.0)
+    w = max(fab, _escape_rule_min(config, net_id, layer))
+    if w <= 0.0 or w >= config.get_net_track_width(net_id, layer) - 1e-9:
+        return None
+    return w
+
+
 def _half_extents(pad):
     hx, hy = pad.size_x / 2, pad.size_y / 2
     rr = getattr(pad, 'rect_rotation', 0.0) or 0.0
