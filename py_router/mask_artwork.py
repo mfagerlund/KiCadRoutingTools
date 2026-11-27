@@ -261,6 +261,7 @@ def _pad_trees(footprints, copper_graphics=None, routed_nets=None) -> Dict[str, 
     from shapely import STRtree, affinity
     from shapely.geometry import Polygon, box
     shapes: Dict[str, list] = {'F.Cu': [], 'B.Cu': []}
+    nets: Dict[str, list] = {'F.Cu': [], 'B.Cu': []}
     seen_rings = set()
     for seg in copper_graphics or ():
         ring = getattr(seg, 'graphic_ring', None)
@@ -270,6 +271,7 @@ def _pad_trees(footprints, copper_graphics=None, routed_nets=None) -> Dict[str, 
         if seg.layer in shapes:
             g = Polygon(ring)
             shapes[seg.layer].append(g if g.is_valid else g.buffer(0))
+            nets[seg.layer].append(getattr(seg, 'net_id', 0) or 0)
     # A pad's opening is exempt so its own net can leave it; a net with one
     # pad never routes, and exempting it only opened the band around it to
     # every OTHER net, whose copper there is bare in the opening
@@ -295,7 +297,8 @@ def _pad_trees(footprints, copper_graphics=None, routed_nets=None) -> Dict[str, 
             for cu in ('F.Cu', 'B.Cu'):
                 if cu in lays or '*.Cu' in lays or 'F&B.Cu' in lays:
                     shapes[cu].append(g)
-    return {cu: (STRtree(gs), gs) for cu, gs in shapes.items() if gs}
+                    nets[cu].append(pad.net_id)
+    return {cu: (STRtree(gs), gs, nets[cu]) for cu, gs in shapes.items() if gs}
 
 
 def _rings(geom):
@@ -316,12 +319,35 @@ def _unowned(geom, pads):
     if pads is None or geom.is_empty:
         return geom
     from shapely import union_all
-    tree, shapes = pads
+    tree, shapes = pads[0], pads[1]
     hit = tree.query(geom, predicate='intersects')
     if len(hit) == 0:
         return geom
     grown = union_all([shapes[i].buffer(OWN_MARGIN, join_style='mitre') for i in hit])
     return geom.difference(grown)
+
+
+def _owned_bands(geom, pads) -> List[Tuple[int, object]]:
+    """[(net id, band)]: the part of a side's artwork `_unowned` cuts out,
+    split by the net whose copper owns it. Each band is exempt only for its
+    own net: copper of ANY other net inside it is bare in the same opening as
+    the pad (KiCad solder_mask_bridge; a +3V3 track through the cut-out band
+    around a GND capacitor pad under a B.Mask rectangle)."""
+    if pads is None or geom.is_empty:
+        return []
+    from shapely import union_all
+    tree, shapes, nets = pads
+    by_net: Dict[int, list] = {}
+    for i in tree.query(geom, predicate='intersects'):
+        if nets[i]:
+            by_net.setdefault(nets[i], []).append(
+                shapes[i].buffer(OWN_MARGIN, join_style='mitre'))
+    out = []
+    for nid in sorted(by_net):
+        band = geom.intersection(union_all(by_net[nid]))
+        if not band.is_empty and band.area > 1e-9:
+            out.append((nid, band))
+    return out
 
 
 def board_mask_artwork(pcb_data) -> List[dict]:
@@ -335,15 +361,54 @@ def board_mask_artwork(pcb_data) -> List[dict]:
     if art is None:
         art = []
         path = getattr(pcb_data, 'source_path', '') or ''
+        bands: List[dict] = []
         if path and os.path.isfile(path):
             with open(path, 'r', encoding='utf-8') as f:
                 art = extract_mask_artwork(
                     f.read(), getattr(pcb_data, 'footprints', None),
                     [s for s in getattr(pcb_data, 'segments', ()) or ()
                      if getattr(s, 'graphic', False) and getattr(s, 'graphic_ring', None)],
-                    {getattr(z, 'net_id', 0) for z in getattr(pcb_data, 'zones', ()) or ()})
+                    {getattr(z, 'net_id', 0) for z in getattr(pcb_data, 'zones', ()) or ()},
+                    bands_out=bands)
         bi.mask_artwork = art
+        bi.mask_opening_bands = bands
     return art
+
+
+def derive_opening_bands(pcb_data) -> List[dict]:
+    """Net-filtered keep-outs (net_keepouts regions) for the pad bands the
+    mask artwork exempts: each binds every net but the band's owner, so a
+    pad's own net still leaves the pad through its opening and no other net's
+    copper enters it. [] when the run keeps no mask artwork out (opt-out,
+    routing_keepouts) or the board has none. The regions reach every engine
+    the net-keep-out guard covers, and its audit reports a breach."""
+    bi = getattr(pcb_data, 'board_info', None)
+    if bi is None:
+        return []
+    on = getattr(bi, 'mask_keepouts', None)
+    if on is None:
+        import routing_defaults
+        on = routing_defaults.MASK_KEEPOUTS
+    if not on:
+        return []
+    if getattr(bi, 'mask_artwork', None) is None or not hasattr(bi, 'mask_opening_bands'):
+        bi.mask_artwork = None
+        board_mask_artwork(pcb_data)
+    names = {nid: n.name for nid, n in (getattr(pcb_data, 'nets', None) or {}).items()
+             if nid and getattr(n, 'name', '')}
+    every = frozenset(names.values())
+    out = []
+    for b in getattr(bi, 'mask_opening_bands', None) or ():
+        own = names.get(b['net_id'], '')
+        out.append({'name': '%s opening band %s' % (b['mask'], own or b['net_id']),
+                    'rule': None, 'polygon': b['polygon'], 'holes': b['holes'],
+                    'layers': {b['layer']}, 'tracks_allowed': False,
+                    'vias_allowed': False, 'nets': every - {own},
+                    'clearance': MASK_REGISTRATION, 'mask_band': True})
+    if not getattr(bi, '_mask_band_said', False):
+        bi._mask_band_said = True
+        print(f"Mask opening bands: armed ({len(out)} other-net regions)")
+    return out
 
 
 def routing_keepouts(pcb_data) -> List[dict]:
@@ -441,7 +506,7 @@ def _graphics(content: str, footprints):
 
 
 def extract_mask_artwork(content: str, footprints=None, copper_graphics=None,
-                         routed_nets=None) -> List[dict]:
+                         routed_nets=None, bands_out: Optional[list] = None) -> List[dict]:
     """Keep-out dicts for the F.Mask / B.Mask artwork of a board (see module
     doc): the union of every graphic on a side, minus the pads' own openings,
     so a logo of many strokes is a few polygons rather than one per stroke.
@@ -450,7 +515,9 @@ def extract_mask_artwork(content: str, footprints=None, copper_graphics=None,
     `copper_graphics` (filled graphic copper Segments) are exempt the same
     way: an opening over a footprint's copper tab is that tab's opening.
     `routed_nets` are nets routed even with a single pad (a zone's net): their
-    lone pad keeps its opening exempt too."""
+    lone pad keeps its opening exempt too. `bands_out`, when given, receives
+    the exempt bands, one dict per net and ring (net_id, polygon, holes,
+    layer, mask), for `derive_opening_bands`."""
     from shapely import union_all
     found = {'F.Mask': [], 'B.Mask': []}
     for g, mask in _graphics(content, footprints):
@@ -463,7 +530,13 @@ def extract_mask_artwork(content: str, footprints=None, copper_graphics=None,
         if not geoms:
             continue
         cu = _MASK_TO_CU[mask]
-        rest = _unowned(union_all(geoms), pads.get(cu))
+        whole = union_all(geoms)
+        rest = _unowned(whole, pads.get(cu))
+        if bands_out is not None:
+            for nid, band in _owned_bands(whole, pads.get(cu)):
+                for ring, ring_holes in _rings(band):
+                    bands_out.append({'net_id': nid, 'polygon': ring,
+                                      'holes': ring_holes, 'layer': cu, 'mask': mask})
         for keep, keep_holes in _rings(rest):
             out.append(_entry(keep, keep_holes, cu, mask))
     return out

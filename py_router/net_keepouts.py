@@ -809,14 +809,16 @@ def derive_finger_bands(pcb_data) -> List[dict]:
 
 
 def derive_mating_keepouts(pcb_data) -> List[dict]:
-    """The keep-outs a mating edge connector's geometry makes, with no rule
+    """The keep-outs the board geometry makes with no rule naming them: a mating edge connector.s
     to name them: no via in a contact finger (#1116) and no copper in the
     finger strip but a finger's own entry (#2022). One list for every
     derivation site -- `design_rules.install_design_rules` and the KiCad
     oracle's own re-parse (kicad_oracle), which re-derived only the rules
     file's keep-outs and so welded GND through the strip and dropped a via in
     two fingers at once."""
-    return derive_contact_fingers(pcb_data) + derive_finger_bands(pcb_data)
+    from mask_artwork import derive_opening_bands
+    return (derive_contact_fingers(pcb_data) + derive_finger_bands(pcb_data)
+            + derive_opening_bands(pcb_data))
 
 
 def binds(ko: dict, net_name: str) -> bool:
