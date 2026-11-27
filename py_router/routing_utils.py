@@ -204,7 +204,8 @@ def iter_pad_blocked_cells(
     # can occur with rectangular pads too. Callers whose geometry adds further
     # sub-grid deviation (diff pair P/N offsets) pass a larger buffer.
     if corner_buffer is None:
-        corner_buffer = 0.0 if env_knobs.RELAX_CORNER else grid_step / 2
+        corner_buffer = (step_corner_buffer(margin, corner_radius, grid_step)
+                         if env_knobs.RELAX_CORNER else grid_step / 2)
     # The sub-cell offset to a nanometre, as in pad_blocked_cells_array
     # (its bit-identical twin): the one absolute-coordinate input.
     off_x = round(off_x, 9)
@@ -307,7 +308,8 @@ def pad_blocked_cells_array(
     case) takes the original bit-identical code path.
     """
     if corner_buffer is None:
-        corner_buffer = 0.0 if env_knobs.RELAX_CORNER else grid_step / 2
+        corner_buffer = (step_corner_buffer(margin, corner_radius, grid_step)
+                         if env_knobs.RELAX_CORNER else grid_step / 2)
     # The sub-cell offset is the one input that comes from ABSOLUTE
     # coordinates (pad.global_x - pad_gx*grid_step), and it carries their
     # last-bit noise: the same pad on the same board moved 10 mm arrives
@@ -643,3 +645,16 @@ def via_track_cells(coord, dist_mm: float):
     if env_knobs.RELAX_VIA_GRID:
         return max(1.0, dist_mm * coord.inv_step)
     return max(1, coord.to_grid_dist_safe(dist_mm))
+
+
+def step_corner_buffer(margin: float, corner_radius: float, grid_step: float) -> float:
+    """KICAD_RELAX_CORNER: the corner buffer a pad keep-out needs so that no
+    grid step between two free cells passes inside the margin. Round a corner
+    the keep-out is a disc of radius R = margin + corner_radius about the
+    corner's centre; a diagonal step (length g*sqrt(2)) whose two ends stand
+    R' off that centre passes sqrt(R'^2 - g^2/2) off it at its middle, so
+    R' = sqrt(R^2 + g^2/2). The buffer is R' - R: 0.0107 mm for R 0.2385 mm
+    on a 0.1 mm grid, where the default buffer is half a step (0.05 mm) and
+    a buffer of 0 lets a 45-degree step clip the corner by that much."""
+    r = margin + corner_radius
+    return math.sqrt(r * r + grid_step * grid_step / 2) - r
