@@ -70,3 +70,32 @@ def test_band_outside_the_opening_is_no_region():
 
 def test_opt_out_derives_no_band():
     assert not [k for k in _pcb(mask_keepouts=False) if k.get('mask_band')]
+
+
+def test_band_is_not_stamped_for_a_set_its_owner_routes_in():
+    # a diff pair routes P and N on one centreline map: P's band binds N, and
+    # stamping it for the pair walled P's pad off (27 pair nets open on a
+    # board with pair pads in a mask opening). A band is stamped only for a
+    # set none of whose nets owns it; a lone other net still gets it.
+    b = RoutingBoard(w=40, h=24)
+    b.pad('P1', 18.0, 12.0, 'NET_P', sx=1.0, sy=1.0)
+    b.pad('P2', 38.0, 2.0, 'NET_P')
+    b.pad('N1', 5.0, 14.0, 'NET_N')
+    b.pad('N2', 35.0, 14.0, 'NET_N')
+    b.items.append(OPENING)
+    tmp = tempfile.mkdtemp(prefix='maskband_')
+    try:
+        path = os.path.join(tmp, 'b.kicad_pcb')
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(b.text())
+        pcb = parse_kicad_pcb(path)
+        pcb.source_path = path
+        import net_keepouts
+        net_keepouts.attach(pcb, net_keepouts.derive_mating_keepouts(pcb))
+        ids = {n.name: nid for nid, n in pcb.nets.items()}
+        band = [i for i, k in enumerate(pcb._net_keepouts) if k.get('mask_band')]
+        assert band
+        assert set(band) <= set(net_keepouts._binding(pcb, [ids['NET_N']]))
+        assert not set(band) & set(net_keepouts._binding(pcb, [ids['NET_P'], ids['NET_N']]))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)

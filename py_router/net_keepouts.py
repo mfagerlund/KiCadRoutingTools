@@ -905,11 +905,18 @@ class _Recorder:
 
 def _binding(pcb_data, net_ids: Iterable[int]) -> Tuple[int, ...]:
     """Indices of the keep-out REGIONS that bind any of `net_ids` (a layer
-    ban is no region: `config_for_nets` honours it)."""
+    ban is no region: `config_for_nets` honours it). A mask opening band
+    (mask_artwork.derive_opening_bands) binds every net but its owner, so it
+    is stamped only when it binds ALL of them: a diff pair routes both
+    members on one map, and the band around one member's pad stamped for the
+    pair walled that pad off its own net."""
     kos = getattr(pcb_data, '_net_keepouts', None) or []
-    names = [getattr(pcb_data.nets.get(nid), 'name', '') for nid in set(net_ids) if nid]
+    names = [n for n in (getattr(pcb_data.nets.get(nid), 'name', '')
+                         for nid in set(net_ids) if nid) if n]
     return tuple(i for i, ko in enumerate(kos)
-                 if not ko.get('layer_ban') and any(n and binds(ko, n) for n in names))
+                 if not ko.get('layer_ban')
+                 and (all if ko.get('mask_band') else any)(binds(ko, n) for n in names)
+                 and names)
 
 
 def _stamper(pcb_data, idx: Tuple[int, ...]):
