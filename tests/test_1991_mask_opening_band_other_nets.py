@@ -99,3 +99,31 @@ def test_band_is_not_stamped_for_a_set_its_owner_routes_in():
         assert not set(band) & set(net_keepouts._binding(pcb, [ids['NET_P'], ids['NET_N']]))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_band_does_not_cover_a_neighbour_pad_at_fine_pitch():
+    # connector pads at 0.5 mm pitch share one opening: each pad's grown band
+    # (OWN_MARGIN) reaches over its neighbours, and a band over a neighbour's
+    # copper refuses that neighbour's own tap. A band keeps only the part no
+    # other net's grown pad covers.
+    b = RoutingBoard(w=40, h=24)
+    b.pad('A1', 18.0, 12.0, 'NET_A', sx=0.25, sy=1.0)
+    b.pad('A2', 38.0, 2.0, 'NET_A')
+    b.pad('B1', 18.5, 12.0, 'NET_B', sx=0.25, sy=1.0)
+    b.pad('B2', 38.0, 22.0, 'NET_B')
+    b.items.append(OPENING)
+    tmp = tempfile.mkdtemp(prefix='maskband_')
+    try:
+        path = os.path.join(tmp, 'b.kicad_pcb')
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write(b.text())
+        pcb = parse_kicad_pcb(path)
+        pcb.source_path = path
+        from net_keepouts import derive_mating_keepouts, binds
+        kos = derive_mating_keepouts(pcb)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    for pt, net in (((18.5, 12.0), 'NET_B'), ((18.0, 12.0), 'NET_A')):
+        assert not [k for k in _regions_at(kos, pt) if binds(k, net)], (pt, net)
+    # the far side of A, away from B, is still A's alone
+    assert any(binds(k, 'NET_B') for k in _regions_at(kos, (17.6, 12.0)))

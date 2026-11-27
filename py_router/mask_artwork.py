@@ -332,7 +332,8 @@ def _owned_bands(geom, pads) -> List[Tuple[int, object]]:
     split by the net whose copper owns it. Each band is exempt only for its
     own net: copper of ANY other net inside it is bare in the same opening as
     the pad (KiCad solder_mask_bridge; a +3V3 track through the cut-out band
-    around a GND capacitor pad under a B.Mask rectangle)."""
+    around a GND capacitor pad under a B.Mask rectangle). Where two nets'
+    grown pads overlap (fine-pitch pads in one opening) neither owns it."""
     if pads is None or geom.is_empty:
         return []
     from shapely import union_all
@@ -342,9 +343,15 @@ def _owned_bands(geom, pads) -> List[Tuple[int, object]]:
         if nets[i]:
             by_net.setdefault(nets[i], []).append(
                 shapes[i].buffer(OWN_MARGIN, join_style='mitre'))
+    grown = {nid: union_all(g) for nid, g in by_net.items()}
     out = []
-    for nid in sorted(by_net):
-        band = geom.intersection(union_all(by_net[nid]))
+    for nid in sorted(grown):
+        # only the part no other net's grown pad also covers: at fine pitch
+        # a band reaches over the neighbour's copper and refuses its own tap;
+        # the shared part stays exempt for every net, as before
+        others = [g for n, g in grown.items() if n != nid]
+        mine = grown[nid].difference(union_all(others)) if others else grown[nid]
+        band = geom.intersection(mine)
         if not band.is_empty and band.area > 1e-9:
             out.append((nid, band))
     return out
