@@ -517,7 +517,47 @@ def _commit(board, config, planned, p, via, pts, layer, w):
                           config.via_drill, p.net_id))
     for a, b in zip(pts, pts[1:]):
         board.planned.append(('seg', a, b, w, layer, p.net_id))
-    planned.setdefault(p.net_id, []).append((p, via, pts, layer, w))
+    entry = (p, via, pts, layer, w)
+    planned.setdefault(p.net_id, []).append(entry)
+    return entry
+
+
+def _withdraw(board, config, planned, entry):
+    """Undo one `_commit`: drop its items from the board and the plan."""
+    p, via, pts, layer, w = entry
+    items = [('via', via[0], via[1], config.via_size, config.via_drill, p.net_id)]
+    items += [('seg', a, b, w, layer, p.net_id) for a, b in zip(pts, pts[1:])]
+    for it in items:
+        board.planned.remove(it)
+    mine = planned[p.net_id]
+    mine[:] = [e for e in mine if e is not entry]
+    if not mine:
+        del planned[p.net_id]
+
+
+def _lone_bones(row, got, config):
+    """Row indices whose dog-bone walls in an adjacent pin of another net
+    that found no site of its own (`got[k]` is None). Only where the row is
+    too tight for that pin's track to pass a via between the two pins: the
+    via then blocks the pin's straight exit, and the pin would route better
+    with no reservation beside it."""
+    out = []
+    for i, ((j, geo), e) in enumerate(zip(row, got)):
+        if e is None:
+            continue
+        for k in (i - 1, i + 1):
+            if not 0 <= k < len(row) or got[k] is not None:
+                continue
+            jk, gk = row[k]
+            if jk[0].net_id == j[0].net_id or jk[0].net_id <= 0:
+                continue
+            if abs(gk['pc'] - geo['pc']) > 1.5 * geo['pitch']:
+                continue  # an unreserved pin lies between them
+            pass_pitch = config.via_size / 2 + jk[3] + jk[2] / 2
+            if geo['pitch'] < pass_pitch - 1e-9:
+                out.append(i)
+                break
+    return out
 
 
 def plan(pcb_data, config, net_ids, by_fp=None, only_pads=None, verbose=False,
@@ -597,23 +637,29 @@ def plan(pcb_data, config, net_ids, by_fp=None, only_pads=None, verbose=False,
                         best = (pat, ok)
                     if all(ok):
                         break
+            got = [None] * len(row)
             rest = []
             for idx, (j, geo) in enumerate(row):
                 p, layer, w, clr, dest = j
                 if best is not None and best[1][idx]:
                     via, pts = best[0][idx]
                     if _legal(board, p, via, pts, w, clr, layer):
-                        _commit(board, config, planned, p, via, pts, layer, w)
+                        got[idx] = _commit(board, config, planned, p, via, pts, layer, w)
                         continue
-                rest.append((j, geo))
-            for j, geo in rest:
+                rest.append(idx)
+            for idx in rest:
+                (j, geo) = row[idx]
                 p, layer, w, clr, dest = j
                 pick = next(((v, pts) for _, v, pts in _single_cands(p, geo, config, dest)
                              if _legal(board, p, v, pts, w, clr, layer)), None)
                 if pick is None:
                     unplaced.append(p)
                 else:
-                    _commit(board, config, planned, p, pick[0], pick[1], layer, w)
+                    got[idx] = _commit(board, config, planned, p, pick[0], pick[1], layer, w)
+            # One pass, no cascade: a withdrawn pin still routes on its own
+            # layer, so it walls nobody in and triggers no further withdrawal.
+            for idx in _lone_bones(row, got, config):
+                _withdraw(board, config, planned, got[idx])
     return planned, unplaced
 
 
