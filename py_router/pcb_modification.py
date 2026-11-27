@@ -6290,7 +6290,7 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
 
             groups = defaultdict(list)
             for s in candidates:
-                groups[(s.layer, round(s.width, 4))].append(s)
+                groups[(s.layer, round(s.width, 6))].append(s)
 
             before = None
             net_changed = False
@@ -6980,7 +6980,7 @@ def merge_collinear_segments(results, pcb_data: PCBData, scope_net_ids=None,
 
         groups = defaultdict(list)
         for s in candidates:
-            groups[(s.layer, round(s.width, 4))].append(s)
+            groups[(s.layer, round(s.width, 6))].append(s)
 
         net_changed = False
         for (layer, w), gsegs in sorted(groups.items()):
