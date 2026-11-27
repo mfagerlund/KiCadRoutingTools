@@ -16,7 +16,7 @@ that was still written (shorting_items and clearance violations).
 The test asserts the invariant, with its own negative control: without the
 swap list handed over the ghost must appear.
 
-    python3 tests/test_NNNN_trim_ghost_segments.py
+    python3 tests/test_805_trim_ghost_segments.py
 """
 import os
 import sys
@@ -109,15 +109,42 @@ def test_the_state_carries_the_writer_list():
     check('state.all_swap_segments IS the caller\'s list', st.all_swap_segments is held)
 
 
+def _calls(path, fname):
+    import ast
+    with open(path, encoding='utf-8') as f:
+        tree = ast.parse(f.read())
+    out = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            fn = node.func
+            name = getattr(fn, 'id', None) or getattr(fn, 'attr', None)
+            if name == fname:
+                out.append({k.arg for k in node.keywords})
+    return out
+
+
+def test_the_call_sites_hand_the_list_on():
+    """Both SE-loop trims pass swap_segments, and batch_route hands the
+    writer list to the state; without these the fix is dead code."""
+    here = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'py_router')
+    trims = _calls(os.path.join(here, 'single_ended_loop.py'), 'trim_net_stub_debris')
+    check('every SE-loop trim passes swap_segments',
+          trims and all('swap_segments' in kw for kw in trims), f"{trims}")
+    states = _calls(os.path.join(here, 'route.py'), 'create_routing_state')
+    check('batch_route hands all_swap_segments to the state',
+          states and all('all_swap_segments' in kw for kw in states), f"{states}")
+
+
 def main():
     print('--- the stub-debris trim must not leave ghost segments')
     test_negative_control_the_ghost_is_reproducible()
     test_the_swap_list_is_stripped_in_place()
     test_the_state_carries_the_writer_list()
+    test_the_call_sites_hand_the_list_on()
     if FAILURES:
         print(f"\n{len(FAILURES)} failure(s): {', '.join(FAILURES)}")
         return 1
-    print('\ntest_NNNN_trim_ghost_segments: all checks passed')
+    print('\ntest_805_trim_ghost_segments: all checks passed')
     return 0
 
 
