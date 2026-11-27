@@ -203,10 +203,6 @@ def iter_pad_blocked_cells(
     # cell center. This applies to ALL pad shapes since diagonal approaches
     # can occur with rectangular pads too. Callers whose geometry adds further
     # sub-grid deviation (diff pair P/N offsets) pass a larger buffer.
-    # KICAD_RELAX_CORNER: the ring margin..margin+buffer is blocked only
-    # where a grid step from that cell to a free cell would clip the pad
-    # (ring_cell_blocked); a caller's explicit buffer stays uniform.
-    exact_ring = corner_buffer is None and env_knobs.RELAX_CORNER
     if corner_buffer is None:
         corner_buffer = (step_corner_buffer(margin, corner_radius, grid_step)
                          if env_knobs.RELAX_CORNER else grid_step / 2)
@@ -267,10 +263,6 @@ def iter_pad_blocked_cells(
 
             dist_sq = dist_sq_to_rounded_rect(cell_x, cell_y, half_width, half_height, corner_radius)
             if dist_sq < effective_margin_sq:
-                if (exact_ring and dist_sq >= margin_sq and not ring_cell_blocked(
-                        cell_x, cell_y, grid_step, rotation_deg if rotated else 0.0,
-                        half_width, half_height, corner_radius, margin_sq)):
-                    continue
                 yield (pad_gx + ex, pad_gy + ey)
 
 
@@ -315,10 +307,6 @@ def pad_blocked_cells_array(
     frame -- for diagonal pads (pad.rect_rotation). 0 (axis-aligned, the common
     case) takes the original bit-identical code path.
     """
-    # KICAD_RELAX_CORNER: the ring margin..margin+buffer is blocked only
-    # where a grid step from that cell to a free cell would clip the pad
-    # (ring_cell_blocked); a caller's explicit buffer stays uniform.
-    exact_ring = corner_buffer is None and env_knobs.RELAX_CORNER
     if corner_buffer is None:
         corner_buffer = (step_corner_buffer(margin, corner_radius, grid_step)
                          if env_knobs.RELAX_CORNER else grid_step / 2)
@@ -334,7 +322,7 @@ def pad_blocked_cells_array(
     off_x = round(off_x, 9)
     off_y = round(off_y, 9)
     key = (half_width, half_height, margin, grid_step, corner_radius,
-           corner_buffer, off_x, off_y, rotation_deg, exact_ring)
+           corner_buffer, off_x, off_y, rotation_deg)
     offs = _PAD_OFFSETS_CACHE.get(key)
     if offs is not None:
         out = np.empty_like(offs)
@@ -401,12 +389,6 @@ def pad_blocked_cells_array(
 
     dist_sq = np.where(corner_region, corner_dist_sq, rect_dist_sq)
     mask = dist_sq < effective_margin_sq
-    if exact_ring:
-        _rot = rotation_deg if rotated else 0.0
-        for i, j in zip(*np.nonzero(mask & (dist_sq >= margin_sq))):
-            mask[i, j] = ring_cell_blocked(
-                float(cell_x[i, j]), float(cell_y[i, j]), grid_step, _rot,
-                half_width, half_height, corner_radius, margin_sq)
 
     global _PAD_OFFSETS_ROWS
     offs = np.empty((int(mask.sum()), 2), dtype=np.int32)
@@ -676,52 +658,3 @@ def step_corner_buffer(margin: float, corner_radius: float, grid_step: float) ->
     a buffer of 0 lets a 45-degree step clip the corner by that much."""
     r = margin + corner_radius
     return math.sqrt(r * r + grid_step * grid_step / 2) - r
-
-
-def step_clips_pad(ax, ay, bx, by, half_width, half_height, corner_radius, margin_sq):
-    """True when the straight step a->b (pad-local frame) passes closer than
-    sqrt(margin_sq) to the rounded rectangle. The distance to a convex shape
-    is convex along a segment, so a fixed ternary search finds its minimum."""
-    lo, hi = 0.0, 1.0
-    dx, dy = bx - ax, by - ay
-    for _ in range(60):
-        m1 = lo + (hi - lo) / 3.0
-        m2 = hi - (hi - lo) / 3.0
-        f1 = dist_sq_to_rounded_rect(ax + m1 * dx, ay + m1 * dy,
-                                     half_width, half_height, corner_radius)
-        f2 = dist_sq_to_rounded_rect(ax + m2 * dx, ay + m2 * dy,
-                                     half_width, half_height, corner_radius)
-        if f1 < f2:
-            hi = m2
-        else:
-            lo = m1
-    t = (lo + hi) / 2.0
-    return dist_sq_to_rounded_rect(ax + t * dx, ay + t * dy, half_width,
-                                   half_height, corner_radius) < margin_sq
-
-
-def ring_cell_blocked(cell_x, cell_y, grid_step, rotation_deg,
-                      half_width, half_height, corner_radius, margin_sq):
-    """A cell outside the keep-out (pad-local centre cell_x, cell_y) must
-    still be blocked when one of its 8 grid steps to a cell this pad leaves
-    free would clip the pad. Steps are global grid steps rotated into the
-    pad frame by R(-rotation)."""
-    if rotation_deg:
-        rad = math.radians(rotation_deg)
-        rc, rs = math.cos(rad), math.sin(rad)
-    else:
-        rc, rs = 1.0, 0.0
-    for sx in (-1, 0, 1):
-        for sy in (-1, 0, 1):
-            if sx == 0 and sy == 0:
-                continue
-            gx, gy = sx * grid_step, sy * grid_step
-            nx = cell_x + gx * rc + gy * rs
-            ny = cell_y - gx * rs + gy * rc
-            if dist_sq_to_rounded_rect(nx, ny, half_width, half_height,
-                                       corner_radius) < margin_sq:
-                continue
-            if step_clips_pad(cell_x, cell_y, nx, ny, half_width, half_height,
-                              corner_radius, margin_sq):
-                return True
-    return False
