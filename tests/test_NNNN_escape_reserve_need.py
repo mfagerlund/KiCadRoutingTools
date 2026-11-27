@@ -139,7 +139,7 @@ def check_release_maps(d):
     ids = [nid for nid, n in pcb.nets.items() if n.name.startswith('S')]
     with contextlib.redirect_stdout(io.StringIO()):
         er.escape_reserve_prepass(pcb, cfg, ids)
-        fe.bind_maps(pcb, object(), cfg)
+        fe.attach_routing_state(pcb, object(), cfg)
         fe.release(pcb)
     st = getattr(pcb, fe._STATE)
     print(f"  after release: routing state {'held' if st.maps is not None else 'dropped'}")

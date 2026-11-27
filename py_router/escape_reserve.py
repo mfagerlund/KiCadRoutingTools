@@ -41,6 +41,7 @@ import os
 import re
 
 import fine_escape as fe
+from via_span import via_layer_pair, via_kind
 
 # Depth steps past the row and lateral offsets (in half pitches) tried per pin.
 DEPTH_STEPS = 6
@@ -629,7 +630,8 @@ def _copper(pcb_data, config, net_id, items):
             pcb_data.segments.append(s)
             out.append(s)
         v = Via(x=vx, y=vy, size=config.via_size, drill=config.via_drill,
-                layers=[config.layers[0], config.layers[-1]], net_id=net_id)
+                layers=via_layer_pair(config), net_id=net_id,
+                via_type=via_kind(config))
         pcb_data.vias.append(v)
         out.append(v)
     return out

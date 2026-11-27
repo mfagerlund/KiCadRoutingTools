@@ -350,7 +350,7 @@ def _lay(pcb_data, st, net_id, config):
     return _lay_stubs(pcb_data, st, net_id, config)
 
 
-def bind_maps(pcb_data, state, config):
+def attach_routing_state(pcb_data, state, config):
     """Give the bracket the run's persistent obstacle maps (`state`'s
     working_obstacles / net_obstacles_cache), so a dog-bone net that fails
     can have its reservation released while routing goes on."""
@@ -579,7 +579,7 @@ def release(pcb_data, working_obstacles=None, net_obstacles_cache=None,
         return 0
     # Nothing is pending after this, so the bound routing state is never read
     # again: drop it, or its obstacle maps outlive the pass into the pour
-    # refill that follows (emberone: +2.7 GB peak, killed at the memory cap).
+    # refill that follows (one 6-layer board: +2.7 GB peak, killed at the memory cap).
     st.maps = None
     st.failed = set()
     if not st.pending:

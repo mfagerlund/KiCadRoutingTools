@@ -49,7 +49,7 @@ def _armed(d, name, rename=None):
     with contextlib.redirect_stdout(io.StringIO()):
         er.escape_reserve_prepass(pcb, cfg, ids)
     st = getattr(pcb, fe._STATE)
-    fe.bind_maps(pcb, types.SimpleNamespace(working_obstacles=None,
+    fe.attach_routing_state(pcb, types.SimpleNamespace(working_obstacles=None,
                                             net_obstacles_cache=None), cfg)
     return pcb, cfg, ids, st
 
