@@ -4443,6 +4443,10 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     if env_knobs.RELAX_CORNER:
         print("Relax corner: armed (KICAD_RELAX_CORNER): pad keep-outs without "
               "the half-cell corner buffer")
+    if env_knobs.HOLE_FLOOR:
+        from hole_rule_routing import board_hole_floor
+        print("Hole floor: armed (KICAD_HOLE_FLOOR): new vias and tracks hold "
+              f"the board hole clearance {board_hole_floor(config):.4f} mm at every rung")
     if env_knobs.RELAX_VIA_GRID:
         print("Relax via grid: armed (KICAD_RELAX_VIA_GRID): via track keep-out "
               "at its exact radius, no diagonal margin")

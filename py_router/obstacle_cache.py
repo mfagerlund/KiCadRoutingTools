@@ -1021,6 +1021,14 @@ def _precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteC
                 if _reach is not None:
                     via_track_list[_i] = max(via_track_list[_i],
                                              via_track_cells(coord, _reach))
+        if env_knobs.HOLE_FLOOR:
+            from hole_rule_routing import hole_floor_track_reach
+            for _i, (ln, lw) in enumerate(zip(config.layers, layer_widths)):
+                _reach = hole_floor_track_reach(config, via, lw,
+                                                extra_on_layer(extra_clearance, ln))
+                if _reach is not None:
+                    via_track_list[_i] = max(via_track_list[_i],
+                                             via_track_cells(coord, _reach))
         # Via-via: this via (actual size) vs a future ROUTE via (config.via_size).
         # Float radius (no floor) so the disc threshold blocks the true clearance.
         # #498: barrels meet on every stack layer -> stack max.

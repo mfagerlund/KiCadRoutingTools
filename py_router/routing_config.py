@@ -729,10 +729,17 @@ class GridRouteConfig:
         or ``other_via`` (an existing via, whose own hole the new via's copper
         is held off the same way) is given, each read as the item it is.
         0.0 with no such rule."""
-        if self.hole_rules is None:
-            return 0.0
-        from hole_rule_routing import via_hole_extra
-        return via_hole_extra(self, clearance, other_via, pad)
+        out = 0.0
+        if self.hole_rules is not None:
+            from hole_rule_routing import via_hole_extra
+            out = via_hole_extra(self, clearance, other_via, pad)
+        import env_knobs
+        if env_knobs.HOLE_FLOOR:
+            # the board's min_hole_clearance holds at every rung, also where
+            # a rung lowers the copper clearance below ring + hole floor
+            from hole_rule_routing import hole_floor_extra
+            out = max(out, hole_floor_extra(self, clearance, other_via))
+        return out
 
     def stack_clearance(self, fallback: float, net_id: Optional[int] = None,
                         pad=None, graphic: bool = False) -> float:

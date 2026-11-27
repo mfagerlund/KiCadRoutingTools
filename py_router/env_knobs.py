@@ -332,6 +332,7 @@ def refresh() -> None:
     g['FINE_NET_FLOOR'] = _opt_in('KICAD_FINE_NET_FLOOR')  # fine-pin signal nets route at the board's minimum track width, others keep theirs (opt-in)
     g['RELAX_CORNER'] = _opt_in('KICAD_RELAX_CORNER')  # pad keep-outs without the half-cell corner buffer (opt-in)
     g['RELAX_VIA_GRID'] = _opt_in('KICAD_RELAX_VIA_GRID')  # via track keep-out at its exact radius, not rounded up to whole cells (opt-in)
+    g['HOLE_FLOOR'] = _opt_in('KICAD_HOLE_FLOOR')  # new vias and tracks hold the board's hole clearance at every clearance rung (opt-in)
     g['RELAX_WIDTH'] = _opt_in('KICAD_RELAX_WIDTH')  # every signal net may neck to the rule floor (opt-in)
     g['ESCAPE_NECK'] = _opt_in('KICAD_ESCAPE_NECK')  # a signal net blocked at its width may enter a pad over a short neck at the board's minimum track width (opt-in)
     g['FINE_ESCAPE'] = _opt_in('KICAD_FINE_ESCAPE')  # fine escape windows for grid-boxed pads (opt-in: #1843 and #1807 fixtures change)

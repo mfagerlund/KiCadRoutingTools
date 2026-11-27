@@ -4516,6 +4516,13 @@ def _via_track_expansion_per_layer(via_size: float, config: GridRouteConfig,
                                     extra_on_layer(extra_clearance, layer))
             if reach is not None:
                 out[i] = max(out[i], via_track_cells(coord, reach))
+    if via is not None and env_knobs.HOLE_FLOOR:
+        from hole_rule_routing import hole_floor_track_reach
+        for i, layer in enumerate(config.layers):
+            reach = hole_floor_track_reach(config, via, config.route_reserve_width(layer),
+                                           extra_on_layer(extra_clearance, layer))
+            if reach is not None:
+                out[i] = max(out[i], via_track_cells(coord, reach))
     return out
 
 

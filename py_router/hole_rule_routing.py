@@ -470,6 +470,44 @@ def via_track_reach(config, via, layer: str, reserve_width: float,
     return drill / 2.0 + v + reserve_width / 2.0 + extra
 
 
+def board_hole_floor(config) -> float:
+    """The board's copper-to-hole clearance (mm) as the run installed it
+    (fab_tiers, from the board's min_hole_clearance), else
+    ``config.hole_clearance``; 0.0 when neither is set."""
+    from fab_tiers import get_via_hole_clearance
+    inst = get_via_hole_clearance()
+    hc = float(inst[0] or 0.0) if inst else 0.0
+    return max(hc, float(getattr(config, 'hole_clearance', 0.0) or 0.0))
+
+
+def hole_floor_extra(config, clearance: float, other_via=None) -> float:
+    """KICAD_HOLE_FLOOR: the mm a new via's keep-out grows by so that the
+    board's hole clearance holds between its hole and another net's copper,
+    and between its copper and ``other_via``'s hole, when the copper
+    clearance in use (``clearance``) plus the annular ring falls short."""
+    hc = board_hole_floor(config)
+    if hc <= 0:
+        return 0.0
+    out = config.via_drill / 2.0 + hc - config.via_size / 2.0 - clearance
+    drill = float(getattr(other_via, 'drill', 0.0) or 0.0) if other_via is not None else 0.0
+    if drill > 0:
+        size = float(getattr(other_via, 'size', 0.0) or 0.0) or config.via_size
+        out = max(out, drill / 2.0 + hc - size / 2.0 - clearance)
+    return max(0.0, out)
+
+
+def hole_floor_track_reach(config, via, reserve_width: float,
+                           extra: float = 0.0) -> Optional[float]:
+    """KICAD_HOLE_FLOOR: the distance (mm) a track's centre keeps from an
+    existing via's centre so the board's hole clearance holds off its hole,
+    or None (no floor, or a via without a drill)."""
+    drill = float(getattr(via, 'drill', 0.0) or 0.0) if via is not None else 0.0
+    hc = board_hole_floor(config)
+    if drill <= 0 or hc <= 0:
+        return None
+    return drill / 2.0 + hc + reserve_width / 2.0 + extra
+
+
 def via_hole_extra(config, clearance: float, other_via=None, pad=None) -> float:
     """See `GridRouteConfig.via_hole_extra`."""
     hr = config.hole_rules
