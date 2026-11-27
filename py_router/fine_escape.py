@@ -333,9 +333,54 @@ class _State:
         self.live = None    # (net id, segs, adopted) of the open bracket
         self.laid = 0       # stub segments laid over the run
         self.kept = 0       # stub segments handed to a successful route
+        self.dogbone = set()  # nets whose reservations escape_reserve plans
+        self.plane = set()    # nets whose dog-bone reaches a pour: kept at release
+        self.maps = None      # routing state holding the persistent maps
+        self.config = None
+        self.failed = set()   # dog-bone nets that failed: released at the next begin
+        self.dropped = 0      # dog-bone objects a successful route did not use
 
 
 def _lay(pcb_data, st, net_id, config):
+    if net_id in st.dogbone:
+        # A dog-bone is planned once, jointly, before the maps exist. A fresh
+        # lay later sees only pcb_data, not copper that so far lives only in
+        # the obstacle maps (phase-3 taps), and shorts it: never lay fresh.
+        return []
+    return _lay_stubs(pcb_data, st, net_id, config)
+
+
+def attach_routing_state(pcb_data, state, config):
+    """Give the bracket the run's persistent obstacle maps (`state`'s
+    working_obstacles / net_obstacles_cache), so a dog-bone net that fails
+    can have its reservation released while routing goes on."""
+    st = getattr(pcb_data, _STATE, None)
+    if st is not None:
+        st.maps = state
+        st.config = config
+
+
+def _flush_failed(pcb_data, st, keep=None):
+    """Release the reservations of dog-bone nets that failed since the last
+    bracket (except `keep`, which is about to route again and adopts its
+    own). Runs at a bracket's start, when every other net's entry is back in
+    the working map, so the refresh is balanced."""
+    nids = sorted(n for n in st.failed if n != keep and n in st.pending
+                  and n not in st.plane)
+    st.failed = {n for n in st.failed if n == keep}
+    if not nids or st.maps is None:
+        return
+    for nid in nids:
+        _drop(pcb_data, st.pending.pop(nid))
+    from obstacle_cache import refresh_net_obstacles
+    refresh_net_obstacles(getattr(st.maps, 'working_obstacles', None),
+                          getattr(st.maps, 'net_obstacles_cache', None),
+                          pcb_data, st.config, nids)
+    if st.verbose:
+        print(f"  fine escape: released the reservations of {len(nids)} failed net(s)")
+
+
+def _lay_stubs(pcb_data, st, net_id, config):
     """Route the stubs of `net_id`'s boxed pads against the copper present
     now and append them to pcb_data as the net's copper. Returns them."""
     from kicad_parser import Segment
@@ -385,12 +430,18 @@ def fine_escape_prepass(pcb_data, config, net_ids, net_clearances=None,
 
 
 def _drop(pcb_data, segs):
+    """Take reserved copper (segments and vias) out of pcb_data."""
     from pcb_modification import bump_copper_epoch
     if not segs:
         return
     ids = {id(s) for s in segs}
     pcb_data.segments[:] = [s for s in pcb_data.segments if id(s) not in ids]
+    pcb_data.vias[:] = [v for v in pcb_data.vias if id(v) not in ids]
     bump_copper_epoch(pcb_data)
+
+
+def _is_via(o):
+    return hasattr(o, 'drill') and not hasattr(o, 'start_x')
 
 
 def begin(pcb_data, net_id, config):
@@ -408,6 +459,7 @@ def begin(pcb_data, net_id, config):
         else:
             _drop(pcb_data, segs)
         st.live = None
+    _flush_failed(pcb_data, st, keep=net_id)
     if net_id not in st.nets:
         return None
     if net_id in st.pending:
@@ -436,13 +488,85 @@ def finish(pcb_data, token, result):
     net_id, segs, adopted = token
     if result and not result.get('failed'):
         _drop(pcb_data, segs)
-        result['new_segments'] = list(segs) + list(result.get('new_segments') or [])
+        if net_id in st.dogbone and net_id not in st.plane:
+            used = _used_bones(pcb_data, net_id, segs, result)
+            st.dropped += len(segs) - len(used)
+            segs = used
+        vias = [o for o in segs if _is_via(o)]
+        tracks = [o for o in segs if not _is_via(o)]
+        result['new_segments'] = tracks + list(result.get('new_segments') or [])
+        if vias:
+            result['new_vias'] = vias + list(result.get('new_vias') or [])
         st.kept += len(segs)
     elif adopted:
         st.pending[net_id] = segs
+        if net_id in st.dogbone:
+            st.failed.add(net_id)
     else:
         _drop(pcb_data, segs)
     return result
+
+
+def _bones(objs):
+    """Split a dog-bone net's reserved objects into bones: each via with
+    the stub segments laid just before it (escape_reserve._copper order)."""
+    out, cur = [], []
+    for o in objs:
+        cur.append(o)
+        if _is_via(o):
+            out.append(cur)
+            cur = []
+    if cur:
+        out.append(cur)
+    return out
+
+
+def _used_bones(pcb_data, net_id, objs, result):
+    """The bones a successful route needs: those whose via or stub its new
+    copper reaches, and those of pads it never touched (a later tap may land
+    there). A bone beside a pad the route reached its own way is dropped, so
+    it does not ship as dead copper that blocked the neighbours."""
+    segs = list(result.get('new_segments') or [])
+    vias = list(result.get('new_vias') or [])
+    pts = [(s.start_x, s.start_y) for s in segs] + [(s.end_x, s.end_y) for s in segs]
+    pts += [(v.x, v.y) for v in vias]
+    pads = list(pcb_data.pads_by_net.get(net_id, []))
+    keep = []
+    for bone in _bones(objs):
+        via = next((o for o in bone if _is_via(o)), None)
+        tracks = [o for o in bone if not _is_via(o)]
+        start = ((tracks[0].start_x, tracks[0].start_y) if tracks
+                 else (via.x, via.y) if via else None)
+        pad = min(pads, key=lambda p: math.hypot(p.global_x - start[0],
+                                                 p.global_y - start[1]),
+                  default=None) if start else None
+
+        def in_pad(x, y):
+            if pad is None:
+                return False
+            hx, hy = _half_extents(pad)
+            return abs(x - pad.global_x) <= hx + 1e-6 and abs(y - pad.global_y) <= hy + 1e-6
+
+        def on_bone(x, y):
+            if via is not None and math.hypot(x - via.x, y - via.y) <= via.size / 2 + 1e-6:
+                return True
+            for t in tracks:
+                if _pt_seg_d(x, y, t.start_x, t.start_y, t.end_x, t.end_y) <= t.width / 2 + 1e-6:
+                    return True
+            return False
+
+        reached = any(on_bone(x, y) and not in_pad(x, y) for x, y in pts)
+        touched = any(in_pad(x, y) for x, y in pts)
+        if reached or not touched:
+            keep.extend(bone)
+    return keep
+
+
+def _pt_seg_d(px, py, ax, ay, bx, by):
+    dx, dy = bx - ax, by - ay
+    L = dx * dx + dy * dy
+    t = 0.0 if L <= 0 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / L))
+    return math.hypot(px - ax - t * dx, py - ay - t * dy)
 
 
 def release(pcb_data, working_obstacles=None, net_obstacles_cache=None,
@@ -451,8 +575,19 @@ def release(pcb_data, working_obstacles=None, net_obstacles_cache=None,
     routed off the board, so no stub ships as unconnected copper and later
     passes see the pads bare. Returns the number of nets released."""
     st = getattr(pcb_data, _STATE, None)
-    if st is None or not st.pending:
+    if st is None:
         return 0
+    # Nothing is pending after this, so the bound routing state is never read
+    # again: drop it, or its obstacle maps outlive the pass into the pour
+    # refill that follows (one 6-layer board: +2.7 GB peak, killed at the memory cap).
+    st.maps = None
+    st.failed = set()
+    if not st.pending:
+        return 0
+    # A dog-bone of a net with a pour is the pin's plane connection: keep it.
+    planes = sorted(n for n in st.pending if n in st.plane)
+    for nid in planes:
+        st.kept += len(st.pending.pop(nid))
     nids = sorted(st.pending)
     for nid in nids:
         _drop(pcb_data, st.pending.pop(nid))
@@ -461,5 +596,7 @@ def release(pcb_data, working_obstacles=None, net_obstacles_cache=None,
         refresh_net_obstacles(working_obstacles, net_obstacles_cache, pcb_data,
                               config, nids)
     print(f"Fine escape: {st.kept} stub segment(s) kept by routes; "
-          f"reservations of {len(nids)} unrouted net(s) released")
+          f"reservations of {len(nids)} unrouted net(s) released"
+          + (f", {len(planes)} plane net(s) kept" if planes else "")
+          + (f", {st.dropped} unused dog-bone object(s) dropped" if st.dropped else ""))
     return len(nids)
