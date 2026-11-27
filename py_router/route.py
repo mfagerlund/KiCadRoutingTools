@@ -3172,6 +3172,17 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     copper_layers=list(getattr(pcb_data.board_info, 'copper_layers', None)
                                        or (layers or [])))
                 _dflt_w = _dr.classes.get('Default', {}).get('track_width')
+                # Strictness audit (2026-11-27): report every self-imposed
+                # limit stricter than this board's rules, with its reason.
+                try:
+                    import strictness_guard as _sg
+                    _pro = os.path.splitext(input_file)[0] + '.kicad_pro'
+                    for _ln in _sg.report_lines(_sg.context(
+                            _dr, _pro, grid=grid_step, via_size=via_size, via_drill=via_drill,
+                            fab=fab_floors(_ncl), copper_count=_ncl, via_span=via_span)):
+                        print(_ln)
+                except Exception as _sge:  # diagnosis only; never stops a route
+                    print(f"strictness guard skipped: {_sge}")
                 # #1676: a via this run sizes itself starts at the board's own
                 # via rules, for every path that lays one at the run's via
                 if via_from_class:
