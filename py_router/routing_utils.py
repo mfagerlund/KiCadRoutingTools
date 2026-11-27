@@ -204,7 +204,7 @@ def iter_pad_blocked_cells(
     # can occur with rectangular pads too. Callers whose geometry adds further
     # sub-grid deviation (diff pair P/N offsets) pass a larger buffer.
     if corner_buffer is None:
-        corner_buffer = grid_step / 2
+        corner_buffer = 0.0 if env_knobs.RELAX_CORNER else grid_step / 2
     # The sub-cell offset to a nanometre, as in pad_blocked_cells_array
     # (its bit-identical twin): the one absolute-coordinate input.
     off_x = round(off_x, 9)
@@ -307,7 +307,7 @@ def pad_blocked_cells_array(
     case) takes the original bit-identical code path.
     """
     if corner_buffer is None:
-        corner_buffer = grid_step / 2
+        corner_buffer = 0.0 if env_knobs.RELAX_CORNER else grid_step / 2
     # The sub-cell offset is the one input that comes from ABSOLUTE
     # coordinates (pad.global_x - pad_gx*grid_step), and it carries their
     # last-bit noise: the same pad on the same board moved 10 mm arrives
@@ -634,3 +634,12 @@ def circle_offsets(block_range: int, effective_sq: float) -> "np.ndarray":
         offs = np.column_stack([exg[mask], eyg[mask]]).astype(np.int32)
         _CIRCLE_OFFSETS_CACHE[key] = offs
     return offs
+
+
+def via_track_cells(coord, dist_mm: float):
+    """Via track keep-out radius in cells. Default: rounded up to whole cells,
+    at least one. KICAD_RELAX_VIA_GRID: the exact radius (the disc test
+    `d^2 <= r^2` already blocks every cell centre closer than the rule)."""
+    if env_knobs.RELAX_VIA_GRID:
+        return max(1.0, dist_mm * coord.inv_step)
+    return max(1, coord.to_grid_dist_safe(dist_mm))

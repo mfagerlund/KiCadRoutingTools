@@ -4436,6 +4436,16 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         from fine_net_floor import apply as fine_net_floor_apply
         fine_net_floor_apply(pcb_data, config,
                              [nid for _, nid in single_ended_nets], verbose=verbose)
+    if env_knobs.RELAX_WIDTH and single_ended_nets:
+        from fine_net_floor import apply_relax as relax_width_apply
+        relax_width_apply(pcb_data, config,
+                          [nid for _, nid in single_ended_nets], verbose=verbose)
+    if env_knobs.RELAX_CORNER:
+        print("Relax corner: armed (KICAD_RELAX_CORNER): pad keep-outs without "
+              "the half-cell corner buffer")
+    if env_knobs.RELAX_VIA_GRID:
+        print("Relax via grid: armed (KICAD_RELAX_VIA_GRID): via track keep-out "
+              "at its exact radius, no diagonal margin")
     # Fine escape windows: a pad the run grid cannot leave gets an escape
     # stub at the rescue grid, reserved here BEFORE the base map build and
     # made part of its net's route when the net routes (see fine_escape.py).

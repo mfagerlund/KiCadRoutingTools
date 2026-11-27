@@ -14,6 +14,7 @@ import numpy as np
 from kicad_parser import PCBData
 from routing_config import GridRouteConfig, GridCoord, extra_on_layer
 import routing_defaults as defaults
+from routing_utils import via_track_cells
 from routing_utils import build_layer_map, iter_pad_blocked_cells, \
     pad_blocked_cells_array, segment_blocked_cells_array, segment_blocked_spans, \
     circle_offsets, GRID_TIE_EPS
@@ -1007,9 +1008,9 @@ def _precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteC
             continue
         vs = via.size if (getattr(via, 'size', 0) and via.size > 0) else config.via_size
         # #498: the via meets each layer's copper ON that layer -> per-layer rule.
-        via_track_list = [max(1, coord.to_grid_dist_safe(
+        via_track_list = [via_track_cells(coord,
             vs / 2 + lw / 2 + config.layer_clearance(ln, obs_clearance, net_id)
-            + extra_on_layer(extra_clearance, ln)))
+            + extra_on_layer(extra_clearance, ln))
             for ln, lw in zip(config.layers, layer_widths)]
         if getattr(config, 'hole_rules', None) is not None:
             # #1853: a hole_clearance rule holds a track off this via's HOLE
@@ -1019,7 +1020,7 @@ def _precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteC
                                          extra_on_layer(extra_clearance, ln))
                 if _reach is not None:
                     via_track_list[_i] = max(via_track_list[_i],
-                                             coord.to_grid_dist_safe(_reach))
+                                             via_track_cells(coord, _reach))
         # Via-via: this via (actual size) vs a future ROUTE via (config.via_size).
         # Float radius (no floor) so the disc threshold blocks the true clearance.
         # #498: barrels meet on every stack layer -> stack max.
@@ -1228,10 +1229,10 @@ def _collect_via_obstacles(via, coord: GridCoord, num_layers: int,
     if isinstance(via_track_expansion_grid, list):
         for layer_idx in span:
             layer_expansion = via_track_expansion_grid[layer_idx]
-            radius = layer_expansion + diagonal_margin + off_cells
+            radius = layer_expansion + (0.0 if env_knobs.RELAX_VIA_GRID else diagonal_margin) + off_cells
             add_layer_cells(circle_offsets(int(math.ceil(radius)), radius ** 2), layer_idx)
     else:
-        radius = via_track_expansion_grid + diagonal_margin + off_cells
+        radius = via_track_expansion_grid + (0.0 if env_knobs.RELAX_VIA_GRID else diagonal_margin) + off_cells
         offs = circle_offsets(int(math.ceil(radius)), radius ** 2)
         for layer_idx in span:
             add_layer_cells(offs, layer_idx)

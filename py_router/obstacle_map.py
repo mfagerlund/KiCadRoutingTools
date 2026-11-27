@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import List, Optional, Tuple, Dict, Set, Union
 from dataclasses import dataclass, field
 import env_knobs
+from routing_utils import via_track_cells
 import numpy as np
 from collections import OrderedDict
 import math
@@ -3858,7 +3859,7 @@ def remove_vias_list_from_obstacles(obstacles: GridObstacleMap, vias: list,
         # would flip borderline cells); integer ex*ex+ey*ey against that
         # scalar is an exact comparison, so the cell multiset is identical.
         for layer_idx in via_span_layer_indices(via, config.layers, num_layers):
-            radius = via_track_expansion_grid[layer_idx] + diagonal_margin + off_cells
+            radius = via_track_expansion_grid[layer_idx] + (0.0 if env_knobs.RELAX_VIA_GRID else diagonal_margin) + off_cells
             effective_track_block_sq = radius ** 2
             track_block_range = int(math.ceil(radius))
             ax = np.arange(-track_block_range, track_block_range + 1, dtype=np.int32)
@@ -4501,10 +4502,10 @@ def _via_track_expansion_per_layer(via_size: float, config: GridRouteConfig,
     layer's copper ON that layer), or -- the via's `net_id` given -- a
     class/type-scoped rule later in the file (#1491). Add/remove twins share
     this helper, so the per-layer values cannot desync ref-counts."""
-    out = [max(1, coord.to_grid_dist_safe(
+    out = [via_track_cells(coord,
                via_size / 2 + config.route_reserve_width(layer) / 2
                + config.layer_clearance(layer, clearance, net_id)
-               + extra_on_layer(extra_clearance, layer)))
+               + extra_on_layer(extra_clearance, layer))
            for layer in config.layers]
     if via is not None and getattr(config, 'hole_rules', None) is not None:
         # #1853: a .kicad_dru hole_clearance rule holds the track off the
@@ -4514,7 +4515,7 @@ def _via_track_expansion_per_layer(via_size: float, config: GridRouteConfig,
             reach = via_track_reach(config, via, layer, config.route_reserve_width(layer),
                                     extra_on_layer(extra_clearance, layer))
             if reach is not None:
-                out[i] = max(out[i], coord.to_grid_dist_safe(reach))
+                out[i] = max(out[i], via_track_cells(coord, reach))
     return out
 
 
@@ -4556,14 +4557,14 @@ def _add_via_obstacle(obstacles: GridObstacleMap, via, coord: GridCoord,
         # Per-layer blocking (impedance-controlled routing)
         for layer_idx in span:
             layer_expansion = via_track_expansion_grid[layer_idx]
-            radius = layer_expansion + diagonal_margin + off_cells
+            radius = layer_expansion + (0.0 if env_knobs.RELAX_VIA_GRID else diagonal_margin) + off_cells
             effective_track_block_sq = radius ** 2
             track_block_range = int(math.ceil(radius))
             offs = circle_offsets(track_block_range, effective_track_block_sq)
             _batch_cells_one_layer(obstacles, center + offs, layer_idx, blocked_cells)
     else:
         # Single value for all layers (legacy behavior)
-        radius = via_track_expansion_grid + diagonal_margin + off_cells
+        radius = via_track_expansion_grid + (0.0 if env_knobs.RELAX_VIA_GRID else diagonal_margin) + off_cells
         effective_track_block_sq = radius ** 2
         track_block_range = int(math.ceil(radius))
         offs = circle_offsets(track_block_range, effective_track_block_sq)

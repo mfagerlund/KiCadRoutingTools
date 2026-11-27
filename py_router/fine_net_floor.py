@@ -72,3 +72,39 @@ def apply(pcb_data, config, net_ids, verbose=False):
         for nid, w in sorted(narrow.items()):
             print(f"  fine-net floor: {names.get(nid, nid)} at {w:.4f}mm")
     return narrow
+
+
+def apply_relax(pcb_data, config, net_ids, verbose=False):
+    """KICAD_RELAX_WIDTH: every signal net keeps its width but may neck to
+    the rule floor where it does not fit. The reserve drops to the narrowest
+    floor and every net is pinned at its width (net_track_widths), so the
+    neck ladder (_route_main_connection) sees each one as wider than the
+    layer width and narrows it to the floor (_neck_width_for_net) on a pad
+    entry that is too tight. Run after apply() when both knobs are on.
+    Returns {net_id: floor width} of the nets that gained a neck."""
+    if getattr(config, 'layer_widths', None) or getattr(config, 'reserve_layer_widths', False):
+        print("Relax width: inert (impedance layer widths in this run)")
+        return {}
+    power = set(getattr(config, 'power_net_widths', None) or {})
+    base = config.track_width
+    widths = dict(config.net_track_widths or {})
+    floors, was = {}, dict(getattr(config, 'fine_floor_from', None) or {})
+    for nid in net_ids:
+        if nid in power:
+            continue
+        cur = min(config.get_net_track_width(nid, l) for l in config.layers)
+        w = max(floor_width(config, nid, l, pcb_data) for l in config.layers)
+        widths.setdefault(nid, config.get_net_track_width(nid, config.layers[0]))
+        if 0.0 < w < cur - 1e-9:
+            floors[nid] = w
+    if not floors:
+        print("Relax width: armed (KICAD_RELAX_WIDTH), no net wider than its floor")
+        return {}
+    config.net_track_widths = widths
+    config.track_width = min(base, min(floors.values()))
+    for nid in floors:
+        was.setdefault(nid, widths[nid])
+    config.fine_floor_from = was
+    print(f"Relax width: armed (KICAD_RELAX_WIDTH): {len(floors)} net(s) may neck "
+          f"to the floor (reserve {base:.4f} -> {config.track_width:.4f}mm)")
+    return floors
