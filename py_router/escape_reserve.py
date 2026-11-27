@@ -264,7 +264,11 @@ def _fine_pins(pcb_data, config, net_ids, by_fp):
             layer = next((l for l in p.layers if l in config.layers), None)
             if layer is None:
                 continue
-            w = config.get_net_track_width(p.net_id, layer)
+            # A net the fine-net floor narrowed still counts as fine at the
+            # width it had: the run grid rarely threads the narrow window
+            # (fine_net_floor.py), so its pins keep their dog-bones.
+            w = ((getattr(config, 'fine_floor_from', None) or {}).get(p.net_id)
+                 or config.get_net_track_width(p.net_id, layer))
             clr = config.get_net_clearance(p.net_id)
             gaps = [_pad_gap(p, q) for q in smd
                     if q is not p and q.net_id != p.net_id and fe._on_layer(q, layer)]

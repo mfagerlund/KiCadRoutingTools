@@ -4430,6 +4430,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
             del net_ids[:]
             del single_ended_nets[:]
 
+    # Fine-net floor: fine-pin signal nets route at the board's minimum
+    # width, every other net keeps its own (fine_net_floor.py, opt-in).
+    if env_knobs.FINE_NET_FLOOR and single_ended_nets:
+        from fine_net_floor import apply as fine_net_floor_apply
+        fine_net_floor_apply(pcb_data, config,
+                             [nid for _, nid in single_ended_nets], verbose=verbose)
     # Fine escape windows: a pad the run grid cannot leave gets an escape
     # stub at the rescue grid, reserved here BEFORE the base map build and
     # made part of its net's route when the net routes (see fine_escape.py).
