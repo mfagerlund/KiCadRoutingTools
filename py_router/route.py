@@ -4438,6 +4438,11 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
         fine_escape_prepass(pcb_data, config,
                             [nid for _, nid in single_ended_nets],
                             net_clearances=net_clearances, verbose=verbose)
+    if env_knobs.ESCAPE_NECK and single_ended_nets:
+        print("Escape neck: armed (KICAD_ESCAPE_NECK): a fine pin whose dog-bone "
+              "has no legal site at its net's width gets one at the board's "
+              "minimum track width" + ("" if env_knobs.ESCAPE_RESERVE
+                                       else " (inert: needs KICAD_ESCAPE_RESERVE)"))
     # Escape reservation: every fine-pitch pin's dog-bone (stub + via) is
     # planned jointly per part and reserved the same way (escape_reserve.py).
     if env_knobs.ESCAPE_RESERVE and single_ended_nets:
