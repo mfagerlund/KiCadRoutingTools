@@ -81,6 +81,16 @@ OWN_MARGIN = 0.5
 # copper clearance applies, only the mask's registration on the fab (a flush
 # edge can come out exposed); typical fab mask registration is +-0.05 mm.
 MASK_REGISTRATION = 0.05
+# A pad with a negative solder_mask_margin (an exposed pad whose mask opening
+# is shrunk inside its copper, HTQFP/QFN thermal pads) is still bridged by
+# KiCad's DRC to foreign copper NEAR ITS COPPER, whatever the margin: KiCad 10
+# kicad-cli on cm4-lvds-adapter U3 pad 65 (8 x 8 mm, margin -2.35) reports
+# solder_mask_bridge for a foreign via 0.175 mm off the pad copper and none at
+# 0.18; margins -0.75, -1 and -3.5 the same at 0.17, -0.5 and above clean.
+# The band binds every other net to EXPOSED_PAD_REACH off the pad copper.
+EXPOSED_PAD_REACH = 0.18
+_MASK_MARGIN_RE = re.compile(r'\(solder_mask_margin\s+' + _NUM + r'\s*\)')
+_PAD_NUM_RE = re.compile(r'\(pad\s+"((?:[^"\\]|\\.)*)"')
 # Widest stroke-font glyph advance (W, M) in em, generous.
 _TEXT_EM_PER_CHAR = 1.3
 
@@ -299,6 +309,53 @@ def _pad_trees(footprints, copper_graphics=None, routed_nets=None) -> Dict[str, 
                     shapes[cu].append(g)
                     nets[cu].append(pad.net_id)
     return {cu: (STRtree(gs), gs, nets[cu]) for cu, gs in shapes.items() if gs}
+
+
+def _exposed_pad_bands(content: str, footprints) -> List[dict]:
+    """Opening bands (bands_out dicts) for netted pads with a negative
+    solder_mask_margin: the pad copper grown by EXPOSED_PAD_REACH less the
+    MASK_REGISTRATION the band's keep-out adds, owned by the pad's net (see
+    EXPOSED_PAD_REACH). Pads are found by their margin token, so a board with
+    none pays one regex pass."""
+    from bisect import bisect_right
+    from kicad_parser import find_matching_paren, _footprint_blocks_by_key
+    from shapely import affinity
+    from shapely.geometry import box
+    out: List[dict] = []
+    spans = starts = None
+    for mm in _MASK_MARGIN_RE.finditer(content):
+        if float(mm.group(1)) >= 0.0:
+            continue
+        ps = content.rfind('(pad ', 0, mm.start())
+        if ps < 0 or find_matching_paren(content, ps) <= mm.start():
+            continue        # a footprint- or board-level margin, not a pad's
+        num = _PAD_NUM_RE.match(content, ps)
+        if num is None:
+            continue
+        if spans is None:
+            spans = list(_footprint_blocks_by_key(content))
+            starts = [sp[0] for sp in spans]
+        i = bisect_right(starts, ps) - 1
+        if i < 0 or spans[i][1] <= ps:
+            continue
+        fp = (footprints or {}).get(spans[i][2])
+        for pad in getattr(fp, 'pads', ()) or ():
+            if pad.pad_number != num.group(1) or not getattr(pad, 'net_id', 0):
+                continue
+            x, y = pad.global_x, pad.global_y
+            hx, hy = pad.size_x / 2.0, pad.size_y / 2.0
+            g = box(x - hx, y - hy, x + hx, y + hy)
+            rr = getattr(pad, 'rect_rotation', 0.0) or 0.0
+            if rr:
+                g = affinity.rotate(g, rr, origin=(x, y))
+            g = g.buffer(EXPOSED_PAD_REACH - MASK_REGISTRATION, join_style='mitre')
+            lays = set(pad.layers or ())
+            for mask, cu in _MASK_TO_CU.items():
+                if mask in lays and (cu in lays or '*.Cu' in lays or 'F&B.Cu' in lays):
+                    for ring, holes in _rings(g):
+                        out.append({'net_id': pad.net_id, 'polygon': ring,
+                                    'holes': holes, 'layer': cu, 'mask': mask})
+    return out
 
 
 def _rings(geom):
@@ -529,6 +586,8 @@ def extract_mask_artwork(content: str, footprints=None, copper_graphics=None,
     found = {'F.Mask': [], 'B.Mask': []}
     for g, mask in _graphics(content, footprints):
         found[mask].append(g)
+    if bands_out is not None:
+        bands_out.extend(_exposed_pad_bands(content, footprints))
     if not any(found.values()):
         return []
     pads = _pad_trees(footprints, copper_graphics, routed_nets)
