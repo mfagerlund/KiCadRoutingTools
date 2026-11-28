@@ -93,12 +93,26 @@ def _in_poly(x, y, poly):
     return inside
 
 
+def _ring_near(a, b, r, ring):
+    """Segment a-b within r of an edge of closed ring `ring`. An edge whose box
+    is r or more away from the segment's box is skipped without a distance."""
+    lx, hx = min(a[0], b[0]) - r, max(a[0], b[0]) + r
+    ly, hy = min(a[1], b[1]) - r, max(a[1], b[1]) + r
+    for i in range(len(ring)):
+        c, d = ring[i - 1], ring[i]
+        if ((c[0] < lx and d[0] < lx) or (c[0] > hx and d[0] > hx)
+                or (c[1] < ly and d[1] < ly) or (c[1] > hy and d[1] > hy)):
+            continue
+        if _seg_seg(a, b, c, d) < r - 1e-9:
+            return True
+    return False
+
+
 def _poly_near(a, b, r, poly):
     """Segment a-b (a point when a == b) inside `poly` or within r of its edge."""
     if _in_poly(a[0], a[1], poly) or _in_poly(b[0], b[1], poly):
         return True
-    return any(_seg_seg(a, b, poly[i - 1], poly[i]) < r - 1e-9
-               for i in range(len(poly)))
+    return _ring_near(a, b, r, poly)
 
 
 def _area_near(a, b, r, poly, holes):
@@ -109,8 +123,7 @@ def _area_near(a, b, r, poly, holes):
             _in_poly(p[0], p[1], h) for h in holes)
     if inside(a) or inside(b):
         return True
-    return any(_seg_seg(a, b, ring[i - 1], ring[i]) < r - 1e-9
-               for ring in [poly, *holes] for i in range(len(ring)))
+    return any(_ring_near(a, b, r, ring) for ring in [poly, *holes])
 
 
 def _ko_on(ko, layer):
@@ -200,6 +213,42 @@ class _Board:
         dr = self.cfg.via_drill / 2
         return max(ring_need + extra, dr + self.hole)
 
+    @property
+    def pads(self):
+        return self._pads
+
+    @pads.setter
+    def pads(self, pads):
+        # Pads by grid cell of their box, so a test reads only nearby pads.
+        # Assigning the list rebuilds the index.
+        self._pads = pads
+        self._pbox = [(q.global_x, q.global_y, *fe._half_extents(q)) for q in pads]
+        self._pgrid = {}
+        for i, (px, py, hx, hy) in enumerate(self._pbox):
+            for cx in range(self._cell(px - hx), self._cell(px + hx) + 1):
+                for cy in range(self._cell(py - hy), self._cell(py + hy) + 1):
+                    self._pgrid.setdefault((cx, cy), []).append(i)
+
+    _CELL = 1.0
+
+    def _cell(self, v):
+        return math.floor(v / self._CELL)
+
+    def _pads_near(self, x, y, span):
+        """Pads whose box comes within `span` of (x, y) on each axis, in
+        board order: the same pads a full scan with that test keeps."""
+        hit = set()
+        g = self._pgrid
+        for cx in range(self._cell(x - span), self._cell(x + span) + 1):
+            for cy in range(self._cell(y - span), self._cell(y + span) + 1):
+                hit.update(g.get((cx, cy), ()))
+        out = []
+        for i in sorted(hit):
+            px, py, hx, hy = self._pbox[i]
+            if abs(px - x) <= span + hx and abs(py - y) <= span + hy:
+                out.append(self._pads[i])
+        return out
+
     def _near(self, items, x, y, span, key):
         return [o for o in items if abs(key(o)[0] - x) <= span and abs(key(o)[1] - y) <= span]
 
@@ -231,8 +280,7 @@ class _Board:
                       if _in_poly(a[0], a[1], o) and _in_poly(b[0], b[1], o)]
             if not inside:
                 return True
-            if all(any(_seg_seg(a, b, o[i - 1], o[i]) < m - 1e-9
-                       for i in range(len(o))) for o in inside):
+            if all(_ring_near(a, b, m, o) for o in inside):
                 return True
         return False
 
@@ -248,10 +296,7 @@ class _Board:
             return False
         span = 3.0
         h2h = cfg.hole_to_hole_clearance
-        for q in self.pads:
-            hx, hy = fe._half_extents(q)
-            if abs(q.global_x - x) > span + hx or abs(q.global_y - y) > span + hy:
-                continue
+        for q in self._pads_near(x, y, span):
             qd = getattr(q, 'drill', 0) or 0
             if qd > 0 and math.hypot(q.global_x - x, q.global_y - y) < dr + qd / 2 + h2h - 1e-9:
                 return False
@@ -299,11 +344,8 @@ class _Board:
         if self._off_rules(a, b, hw, layer, False):
             return False
         span = 3.0 + math.hypot(b[0] - a[0], b[1] - a[1])
-        for q in self.pads:
+        for q in self._pads_near(a[0], a[1], span):
             if q is own_pad or q.net_id == net_id or not fe._on_layer(q, layer):
-                continue
-            hx, hy = fe._half_extents(q)
-            if abs(q.global_x - a[0]) > span + hx or abs(q.global_y - a[1]) > span + hy:
                 continue
             if _pad_dist_seg(q, a, b) < hw + self._clr(q.net_id, clr) - 1e-9:
                 return False
