@@ -11,7 +11,7 @@ import os
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from kicad_parser import PCBData, Segment, Via, is_immutable_copper
-from routing_utils import pos_key, POSITION_DECIMALS
+from routing_utils import pos_key, POSITION_DECIMALS, neck_round
 from geometry_utils import point_to_segment_distance, segments_intersect
 from via_span import HELD_OUTSIDE_SPAN
 
@@ -5469,7 +5469,7 @@ def prune_grazing_segments(results, pcb_data: PCBData, scope_net_ids=None,
                     # Verify the necked net before committing; revert + defer
                     # to the nudges if connectivity would worsen.
                     _old_w = s.width
-                    s.width = round(max(floor, allowed), 4)
+                    s.width = neck_round(max(floor, allowed), floor)
                     _kept_now = [x for i, x in enumerate(net_segs)
                                  if i not in dropped_idx]
                     if worse(before, check_net_connectivity(

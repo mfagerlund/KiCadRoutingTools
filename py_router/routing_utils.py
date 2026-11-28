@@ -738,3 +738,12 @@ def exact_ring_pad(half_width, half_height):
     little and the exact ring's sparser keep-out loses elsewhere."""
     lim = env_knobs.RELAX_CORNER_FINE
     return lim <= 0 or 2.0 * min(half_width, half_height) < lim
+
+
+def neck_round(width, floor):
+    """A necked track width as written: on KiCad's 1 nm grid and never below
+    `floor`. Rounding to 0.1 um put a 0.19812 floor (7.8 mil Board Setup
+    minimum) at 0.1981, under the rule it was necked to."""
+    w = round(float(width), 6)
+    f = float(floor or 0.0)
+    return w if w >= f - 1e-9 else f
