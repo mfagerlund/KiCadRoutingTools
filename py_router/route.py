@@ -12044,6 +12044,12 @@ For differential pair routing, use route_diff.py:
               "castellated retract and the DRC-settings writeback; the "
               "output is the input board, project and rules included)")
 
+    # Same-net hole-to-hole guard on the written board (every via-laying pass
+    # of this step is done): one board-level evaluator for the pairs no
+    # step-local merge saw (via_hole_guard).
+    if not args.skip_routing and args.output_file and not _gate_reverted:
+        from via_hole_guard import guard_step_output
+        guard_step_output(args.output_file, args.hole_to_hole_clearance)
     # Castellated landings (run-6 fix 1.7): pull track ends that landed inside
     # a castellated pad's edge-clearance zone back to the pad's inner reach.
     # No-op on boards without pad_prop_castellated pads or an edge rule.

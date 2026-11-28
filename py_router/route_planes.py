@@ -5039,6 +5039,12 @@ Examples:
         except Exception as e:
             print(f"  (skipped castellated-landing retract: {e})")
 
+    # Same-net hole-to-hole guard on the written board (every via-laying pass
+    # of this step is done): one board-level evaluator for the pairs no
+    # step-local merge saw (via_hole_guard).
+    if not args.dry_run and args.output_file:
+        from via_hole_guard import guard_step_output
+        guard_step_output(args.output_file, args.hole_to_hole_clearance)
     # NO KiCad-oracle recheck here (#217): the plane this step just poured has NOT
     # yet been stitched -- tying pads/islands into the pour is the route step's
     # job (#562: its pour-launch welds and in-run plane finalize). At the

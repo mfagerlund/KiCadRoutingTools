@@ -4235,6 +4235,12 @@ Examples:
                 net_name_patterns=all_patterns,
                 json_out=args.json_out)
 
+    # Same-net hole-to-hole guard on the written board (every via-laying pass
+    # of this step is done): one board-level evaluator for the pairs no
+    # step-local merge saw (via_hole_guard).
+    if not args.skip_routing and args.output_file:
+        from via_hole_guard import guard_step_output
+        guard_step_output(args.output_file, args.hole_to_hole_clearance)
     # Make the output project's DRC design rules consistent with the floors we
     # just routed to (issue #160), mirroring route.py, so a manual DRC in KiCad
     # flags only genuine problems instead of stock-default noise.

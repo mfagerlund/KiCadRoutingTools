@@ -4193,6 +4193,12 @@ Examples:
                   f"the oracle reconnect pass did not run; output may differ "
                   f"from machines where it can (replay-determinism caveat).")
 
+    # Same-net hole-to-hole guard on the written board (every via-laying pass
+    # of this step is done): one board-level evaluator for the pairs no
+    # step-local merge saw (via_hole_guard).
+    if not args.dry_run and args.output_file:
+        from via_hole_guard import guard_step_output
+        guard_step_output(args.output_file, args.hole_to_hole_clearance)
     # #962: declare Type VII on every via this run put in a pad or a paste
     # opening -- AFTER the oracle reconnect above, which lays vias of its own,
     # so the record describes the board that ships. GUI twin: the planes tab's
