@@ -11,7 +11,9 @@ when their net routes, so every site must already be legal:
   2. against a pad of a net whose netclass clearance is larger than the
      pin's, a via keeps that larger clearance (KiCad grades the pair at the
      larger of the two);
-  3. a board cutout (a hole in the outline) holds no via.
+  3. a board cutout (a hole in the outline) holds no via;
+  4. a keep-out with a hole (a frame around the usable area) forbids only
+     its ring: sites inside the hole stay legal, sites in the ring do not.
 
 Fixture: the fine-pitch row of test_NNNN_escape_reserve_qfn (a column of
 0.5 mm pitch pads, a wall pad of another net across a strip in front of it).
@@ -139,6 +141,23 @@ def test_cutout_holds_no_via():
     vias, _ = _plan(pcb, cfg)
     bad = [v for v in vias if _ring_hits_box(v[0], v[1], cfg.via_size / 2, box)]
     assert not bad, f'vias in a board cutout: {bad}'
+
+
+def test_keepout_hole_is_allowed():
+    pcb = _load()
+    cfg = qfn._config()
+    vias0, _ = _plan(pcb, cfg)
+    x0, y0, x1, y1 = _area_of(vias0)
+    outer = _box(x0 - 20, y0 - 20, x1 + 20, y1 + 20)
+    ym = (y0 + y1) / 2
+    hole = _box(x0 - 10, ym, x1 + 10, y1 + 10)       # frees the lower half
+    pcb.board_info.keepouts = [{'polygon': outer, 'holes': [hole],
+                                'layers': {'*.Cu'}, 'tracks_allowed': False,
+                                'vias_allowed': False}]
+    vias, _ = _plan(pcb, cfg)
+    assert vias, 'sites inside the keep-out hole must stay legal'
+    ring = [v for v in vias if not (hole[0][1] + cfg.via_size / 2 <= v[1])]
+    assert not ring, f'vias in the keep-out ring: {ring}'
 
 
 if __name__ == '__main__':

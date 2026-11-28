@@ -101,6 +101,18 @@ def _poly_near(a, b, r, poly):
                for i in range(len(poly)))
 
 
+def _area_near(a, b, r, poly, holes):
+    """_poly_near for an area with holes: the holes are outside the area, and
+    their edges are its edges too."""
+    def inside(p):
+        return _in_poly(p[0], p[1], poly) and not any(
+            _in_poly(p[0], p[1], h) for h in holes)
+    if inside(a) or inside(b):
+        return True
+    return any(_seg_seg(a, b, ring[i - 1], ring[i]) < r - 1e-9
+               for ring in [poly, *holes] for i in range(len(ring)))
+
+
 def _ko_on(ko, layer):
     """Does keep-out `ko` cover copper layer `layer` (None = any layer)?"""
     kl = ko.get('layers') or set()
@@ -207,7 +219,8 @@ class _Board:
                 continue
             if not via and (ko.get('tracks_allowed', True) or not _ko_on(ko, layer)):
                 continue
-            if _poly_near(a, b, r, ko['polygon']):
+            holes = [h for h in (ko.get('holes') or ()) if len(h) >= 3]
+            if _area_near(a, b, r, ko['polygon'], holes):
                 return True
         m = r + self.edge
         for c in self.cutouts:
