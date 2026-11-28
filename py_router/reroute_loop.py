@@ -41,6 +41,21 @@ from diff_pair_custody import (classify_diff_pair_failure, record_casualty,
 from terminal_colors import RED, GREEN, RESET
 
 
+
+def victim_may_displace(input_custody, victim_name, squatter_names):
+    """#622 victim-priority restore inside a reconcile sub-run rips the
+    squatters holding a terminally-failed victim's channel so the victim
+    restores whole. The sub-run's notion of 'victim' is local: copper the
+    OUTER run routed counts as pre-existing there. A squatter that was
+    connected on the outer run's INPUT (and broken by it -- it is being
+    reconciled) outranks a victim that was not: swapping them would ship an
+    input-connected net broken to rescue a net the outer run routed. False
+    when any squatter is in input_custody and the victim is not."""
+    custody = set(input_custody or ())
+    if not custody or victim_name in custody:
+        return True
+    return not any(n in custody for n in squatter_names)
+
 def run_reroute_loop(
     state: RoutingState,
     route_index_start: int = 0,
@@ -130,6 +145,9 @@ def run_reroute_loop(
     # KICAD_VICTIM_RESTORE=0 reverts.
     _vr_swept622 = [False]
 
+    def _net_name622(pcb, nid):
+        return pcb.nets[nid].name if nid in pcb.nets else str(nid)
+
     def _victim_priority_sweep622() -> bool:
         nonlocal successful
         import env_knobs as _ek622
@@ -170,6 +188,15 @@ def run_reroute_loop(
             # fired on 0 arms for that reason). Protection replaces the
             # ancestry guard here.
             _prot0 = set(state.restore_protected_net_ids) | {_vid}
+            if not victim_may_displace(
+                    getattr(config, 'input_custody', ()),
+                    _net_name622(pcb_data, _vid),
+                    [_net_name622(pcb_data, _o) for _o in _owners0]):
+                print(f"  VICTIM-PRIORITY RESTORE (#622): "
+                      f"{_net_name622(pcb_data, _vid)} not restored -- its "
+                      f"squatter(s) were connected on the outer run's input "
+                      f"(input custody outranks this run's copper)")
+                continue
             if not _owners0 or len(_owners0) > 3 or not all(
                     _o in routed_results and _o not in _prot0
                     and _o not in diff_pair_by_net_id
