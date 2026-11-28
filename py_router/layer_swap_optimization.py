@@ -9,6 +9,7 @@ This module handles the upfront layer swap optimization that happens before rout
 The goal is to minimize the number of vias needed by swapping stubs to compatible layers.
 """
 from __future__ import annotations
+from routing_utils import stored_value
 
 from typing import List, Dict, Set, Tuple, Optional
 from dataclasses import dataclass
@@ -219,13 +220,13 @@ def _swap_vias_fit_or_shrink(pcb_data, new_vias, config) -> bool:
                         if rung_tier(ladder, i) == 0)
     size = config.via_size
     while size > via_floor + 1e-9:
-        size = max(round(size - 0.05, 3), via_floor)
-        drill = max(min(config.via_drill, round(size - ANNULAR, 3)), drill_floor)
+        size = stored_value(size - 0.05, floor=via_floor)
+        drill = stored_value(min(config.via_drill, size - ANNULAR), floor=drill_floor)
         if drill >= size:              # floor drill wider than the shrunk body: stop
             break
         pairs = [(size, drill)]
         if ring:
-            held = round(size - 2.0 * ring, 3)
+            held = stored_value(size - 2.0 * ring, cap=size - 2.0 * ring)
             lo = (drill_floor if board_rules or drill < nominal_drill - 1e-9
                   else nominal_drill)
             if lo - 1e-9 <= held < drill - 1e-9:

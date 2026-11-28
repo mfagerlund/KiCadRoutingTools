@@ -5,6 +5,7 @@ This module contains the main loop for routing differential pairs,
 extracted from route.py for better maintainability.
 """
 from __future__ import annotations
+from routing_utils import stored_value
 
 import time
 from typing import List, Tuple
@@ -188,9 +189,9 @@ def narrow_pair_rungs(config, pcb_data, pair) -> List[float]:
         # a rung at the call's own track width would draw the middle at the
         # connectors' width, where the shipped-width rows cannot see it
         if abs(w - config.track_width) > DRAWN_WIDTH_TOL:
-            rungs.append(round(w, 4))
+            rungs.append(stored_value(w, floor=floor))
         w -= config.grid_step
-    rungs.append(round(floor, 4))
+    rungs.append(stored_value(floor, floor=floor))
     return rungs
 
 
@@ -199,7 +200,7 @@ def _width_runs(segs):
     neighbours merged."""
     runs = []
     for s in segs:
-        w = round(s.width, 4)
+        w = stored_value(s.width)
         if not runs or runs[-1] != w:
             runs.append(w)
     return runs

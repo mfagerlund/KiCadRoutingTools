@@ -11,7 +11,7 @@ import os
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from kicad_parser import PCBData, Segment, Via, is_immutable_copper
-from routing_utils import pos_key, POSITION_DECIMALS, neck_round
+from routing_utils import pos_key, POSITION_DECIMALS, neck_round, stored_value
 from geometry_utils import point_to_segment_distance, segments_intersect
 from via_span import HELD_OUTSIDE_SPAN
 
@@ -6292,7 +6292,7 @@ def smooth_octolinear_chains(results, pcb_data: PCBData, scope_net_ids=None,
 
             groups = defaultdict(list)
             for s in candidates:
-                groups[(s.layer, round(s.width, 4))].append(s)
+                groups[(s.layer, stored_value(s.width))].append(s)
 
             before = None
             net_changed = False
@@ -6982,7 +6982,7 @@ def merge_collinear_segments(results, pcb_data: PCBData, scope_net_ids=None,
 
         groups = defaultdict(list)
         for s in candidates:
-            groups[(s.layer, round(s.width, 4))].append(s)
+            groups[(s.layer, stored_value(s.width))].append(s)
 
         net_changed = False
         for (layer, w), gsegs in sorted(groups.items()):
@@ -8609,7 +8609,7 @@ def merge_close_route_vias(results, segs_by_net, vias_by_net, pcb_data, config,
                                          net_clearances=nc,
                                          area=getattr(config, 'area_clearance', None))
                         and edge_ok(keep.x, keep.y, drop.x, drop.y, w, clr)):
-                    w = math.floor(waist * 1e4) / 1e4
+                    w = stored_value(waist, cap=waist)
                     if w < min_width() - 1e-9:
                         return None
             bridges.append(Segment(start_x=keep.x, start_y=keep.y,

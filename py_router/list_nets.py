@@ -23,6 +23,7 @@ Examples:
 #: the board. Read by krt_registry.py -- by AST, never imported.
 KRT_TOOL = {'scope': ['placement', 'routing'], 'kind': 'instrument'}
 
+from routing_utils import stored_value
 import argparse
 import json
 import math
@@ -120,7 +121,7 @@ def effective_floors(constraints, copper_layers, via_rule_floors=None):
                    (fmin['via_diameter'] - fmin['via_drill']) / 2.0)
     via_dia = floor(_vr.get('via_diameter', constraints.get('min_via_diameter')),
                     fab['via_diameter'])
-    via_held = round(via_drill + 2.0 * via_ring, 4)
+    via_held = stored_value(via_drill + 2.0 * via_ring, floor=via_drill + 2.0 * via_ring)
 
     return {
         'working_via_diameter': max(via_dia, via_held),

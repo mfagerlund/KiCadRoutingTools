@@ -17,6 +17,7 @@ are built on a small window around the pad so a fine grid stays cheap even
 on large boards.
 """
 from __future__ import annotations
+from routing_utils import stored_value
 
 import copy
 import math
@@ -207,9 +208,9 @@ def _clearance_ladder(nominal: float, fab_floor: float, n_steps: int) -> List[fl
     caller stops at the first clearance that routes so the loosest one wins (#226)."""
     floor = min(nominal, fab_floor)
     if nominal <= floor or n_steps < 1:
-        return [round(floor, 4)]
+        return [stored_value(floor, floor=floor)]
     step = (nominal - floor) / n_steps
-    return [round(nominal - step * i, 4) for i in range(1, n_steps + 1)]
+    return [stored_value(nominal - step * i, floor=floor) for i in range(1, n_steps + 1)]
 
 
 def fab_floor_clearance_track(pcb_data: PCBData):

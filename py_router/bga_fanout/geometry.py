@@ -4,6 +4,7 @@ Geometry calculations for BGA fanout routing.
 Functions for calculating 45-degree stubs, exit points, and jog endpoints.
 """
 from __future__ import annotations
+from routing_utils import stored_value
 
 import bisect
 import math
@@ -265,7 +266,7 @@ def clamp_via_to_pad(via_size: float, via_drill: float, pad,
         # larger fab['annular'] (which would force the drill below the floor and
         # needlessly over-shrink a via that fits the pad fine).
         min_annular = (floor_dia - floor_drill) / 2.0
-        new_size = round(pad_min, 4)
+        new_size = stored_value(pad_min, floor=floor_dia, cap=pad_min)
         # Keep the configured drill, only thinning it as far as the ring needs, and
         # never below this rung's drill floor.
         new_drill = max(min(via_drill, new_size - 2 * min_annular), floor_drill)
@@ -284,7 +285,7 @@ def clamp_via_to_pad(via_size: float, via_drill: float, pad,
         note_narrowing(getattr(pad, 'net_id', None), 'via_diameter', via_size, new_size,
                        'via-in-pad clamp')
         from fab_tiers import rung_tier
-        return new_size, round(new_drill, 4), 'clamped', rung_tier(floors, rung)
+        return new_size, stored_value(new_drill, floor=floor_drill), 'clamped', rung_tier(floors, rung)
 
     # Even the deepest rung's via bulges past this pad: hold it at that floor.
     deepest = len(floors) - 1

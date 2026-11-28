@@ -1313,7 +1313,8 @@ def differential_gap_for_impedance(pcb: PCBData, layer_name: str, trace_width: f
             lo = mid
         else:
             hi = mid
-    gap = min(max_gap, math.ceil(hi * 1e4 - 1e-6) / 1e4)
+    from routing_utils import stored_value
+    gap = min(max_gap, stored_value(hi, floor=hi))
     return gap, zdiff(gap)
 
 

@@ -10,6 +10,7 @@ Generic module that analyzes actual pad geometry to determine:
 Works with any QFN/QFP package regardless of pin count or size.
 """
 from __future__ import annotations
+from routing_utils import stored_value
 
 import env_knobs
 import math
@@ -523,13 +524,13 @@ def qfn_clearance_ladder(clearance, copper_layer_count):
     if floor >= clearance - 1e-9:
         return []
     step = _rd.QFN_ESCALATION_STEP
-    vals = {round(r['clearance'], 4) for r in rungs
+    vals = {stored_value(r['clearance'], floor=floor) for r in rungs
             if floor - 1e-9 <= r['clearance'] < clearance - 1e-9}
     k = 1
     while clearance - k * step > floor + 1e-9:
-        vals.add(round(clearance - k * step, 4))
+        vals.add(stored_value(clearance - k * step, floor=floor))
         k += 1
-    vals.add(round(floor, 4))
+    vals.add(stored_value(floor, floor=floor))
     return sorted(vals, reverse=True)
 
 

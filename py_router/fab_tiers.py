@@ -1052,8 +1052,9 @@ def drill_meeting_rules(diameter, drill, drill_floor, ring_floor, floors):
         return None
     if _via_holding_ring(diameter, lo, ring) > diameter + 1e-9:
         return None
-    # Rounded DOWN to 0.1 um, so the ring it leaves is never a rounding under.
-    hi = math.floor(round(diameter - 2.0 * ring, 6) * 1e4 + 1e-6) / 1e4
+    # Rounded DOWN onto the grid, so the ring it leaves is never a rounding under.
+    from routing_utils import stored_value
+    hi = stored_value(diameter - 2.0 * ring, cap=diameter - 2.0 * ring)
     return max(lo, min(drill, hi))
 
 

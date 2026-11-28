@@ -740,10 +740,31 @@ def exact_ring_pad(half_width, half_height):
     return lim <= 0 or 2.0 * min(half_width, half_height) < lim
 
 
+#: KiCad stores lengths in integer nanometres.
+STORED_DECIMALS = 6
+
+
+def stored_value(value, floor=None, cap=None):
+    """A width, clearance, drill or diameter as the router stores it: on
+    KiCad's 1 nm grid, never below `floor` (rounded up onto the grid) and
+    never above `cap` (rounded down onto it). Where both bind, the floor
+    wins: a rule minimum outranks a fit. Every value the router computes and
+    keeps goes through here; rounding to 0.1 um put a 0.19812 floor (7.8 mil
+    Board Setup minimum) at 0.1981, under the rule it was narrowed to."""
+    import math
+    v = round(float(value), STORED_DECIMALS)
+    scale = 10 ** STORED_DECIMALS
+    if cap is not None:
+        c = math.floor(float(cap) * scale + 1e-6) / scale
+        if v > c:
+            v = c
+    if floor is not None and floor:
+        f = math.ceil(float(floor) * scale - 1e-6) / scale
+        if v < f:
+            v = f
+    return v
+
+
 def neck_round(width, floor):
-    """A necked track width as written: on KiCad's 1 nm grid and never below
-    `floor`. Rounding to 0.1 um put a 0.19812 floor (7.8 mil Board Setup
-    minimum) at 0.1981, under the rule it was necked to."""
-    w = round(float(width), 6)
-    f = float(floor or 0.0)
-    return w if w >= f - 1e-9 else f
+    """A necked track width as written (stored_value with its floor)."""
+    return stored_value(width, floor=floor or None)

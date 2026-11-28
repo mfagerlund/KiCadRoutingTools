@@ -2623,6 +2623,28 @@ def _hole_stamp_widths(config: GridRouteConfig,
     return groups
 
 
+def pad_hole_floor(config) -> float:
+    """KICAD_HOLE_FLOOR: the board's copper-to-hole minimum (mm) that plated
+    pad holes are held to by `stamp_hole_rule_pad_holes`; 0.0 when the knob
+    is off or the board declares none."""
+    if not env_knobs.HOLE_FLOOR:
+        return 0.0
+    from hole_rule_routing import board_hole_floor
+    return board_hole_floor(config)
+
+
+def _thin_ring(pad, floor: float) -> bool:
+    """A plated pad whose narrowest copper ring is under ``floor``: its copper
+    keep-out (ring + clearance) can stop short of the board's hole minimum.
+    NPTH pads are held by the NPTH stamp in `add_drill_hole_obstacles`."""
+    if not _pad_has_copper(pad):
+        return False
+    size = min(float(getattr(pad, 'size_x', 0.0) or 0.0),
+               float(getattr(pad, 'size_y', 0.0) or 0.0))
+    drill = float(getattr(pad, 'drill', 0.0) or 0.0)    # a slot's long axis
+    return (size - drill) / 2.0 < floor - 1e-9
+
+
 def stamp_hole_rule_pad_holes(obstacles, pads, config: GridRouteConfig,
                               extra_clearance: float = 0.0) -> None:
     """#1853: hold copper off the HOLES of ``pads`` -- plated or not -- at the
@@ -2639,7 +2661,8 @@ def stamp_hole_rule_pad_holes(obstacles, pads, config: GridRouteConfig,
     cache's collector (`precompute_net_obstacles`). No-op with no such rule,
     so a board without one builds the same map."""
     hr = getattr(config, 'hole_rules', None)
-    if hr is None:
+    floor = pad_hole_floor(config)
+    if hr is None and floor <= 0:
         return
     by_layer: Dict[tuple, list] = {}
     by_via: Dict[float, list] = {}
@@ -2647,16 +2670,25 @@ def stamp_hole_rule_pad_holes(obstacles, pads, config: GridRouteConfig,
         if not (getattr(pad, 'drill', 0) or 0) > 0:
             continue
         circles = None
+        # KICAD_HOLE_FLOOR: the board's own copper-to-hole minimum is the
+        # default rule for a plated hole whose ring is thinner than it (the
+        # pad-copper keep-out then stops short of it at any clearance rung)
+        f = floor if floor > 0 and _thin_ring(pad, floor) else None
         for li, layer in enumerate(config.layers):
-            v = hr.pad_value(pad, layer)
+            v = hr.pad_value(pad, layer) if hr is not None else None
+            if f is not None:
+                v = f if v is None else max(v, f)
             if v is None:
                 continue
             if circles is None:
                 circles = pad_drill_circles(pad)
             by_layer.setdefault((li, v), []).extend(circles)
         # a new via's copper, read as a via, on the layers it is on
-        vals = [hr.pad_value(pad, l, 'via') for l in hr.new_via_layers]
+        vals = ([hr.pad_value(pad, l, 'via') for l in hr.new_via_layers]
+                if hr is not None else [])
         vals = [x for x in vals if x is not None]
+        if f is not None:
+            vals.append(f)
         if vals:
             c = max(vals) + (config.via_size - config.via_drill) / 2.0
             if c > config.hole_to_hole_clearance + 1e-9:
@@ -2777,7 +2809,8 @@ def add_drill_hole_obstacles(obstacles: GridObstacleMap, pcb_data: PCBData,
     # this step routes are stamped with the rest of their net's keep-outs
     # (the per-net cache and `add_net_pads_as_obstacles`), so that a net
     # still reaches its own holes while every other net is held off them.
-    if getattr(config, 'hole_rules', None) is not None:
+    # KICAD_HOLE_FLOOR adds the board's own minimum to thin-ring plated holes.
+    if getattr(config, 'hole_rules', None) is not None or pad_hole_floor(config) > 0:
         stamp_hole_rule_pad_holes(
             obstacles, [p for nid, ps in pcb_data.pads_by_net.items()
                         if nid not in nets_to_route_set for p in ps],

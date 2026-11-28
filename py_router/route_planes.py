@@ -14,6 +14,7 @@ Usage:
     python3 py_router/route_planes.py input.kicad_pcb output.kicad_pcb --nets GND --plane-layers B.Cu
 """
 from __future__ import annotations
+from routing_utils import stored_value
 
 #: #937 registry: which door(s) show this tool, and whether it changes
 #: the board. Read by krt_registry.py -- by AST, never imported.
@@ -2117,7 +2118,8 @@ def _neck_plane_segments(all_new_segments, pcb_data, clearance, all_layers,
         floor_half = min(base, min_width) / 2.0
         new_half = max(new_half, floor_half)
         if new_half < half - 1e-9:
-            seg['width'] = round(2.0 * new_half, 4)
+            seg['width'] = stored_value(2.0 * new_half, floor=2.0 * floor_half,
+                                            cap=2.0 * new_half)
             necked += 1
     if necked:
         print(f"  Necked {necked} plane tap segment(s) to clear foreign vias/pads")

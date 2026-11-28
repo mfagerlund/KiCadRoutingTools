@@ -2111,8 +2111,9 @@ def oracle_via_rungs(config, pcb_data, net_id):
     except Exception:                                   # noqa: BLE001
         rungs = []
     if rungs:
-        vs = round(float(rungs[0]['via_diameter']), 4)
-        vd = round(float(rungs[0]['via_drill']), 4)
+        from routing_utils import stored_value
+        vs = stored_value(rungs[0]['via_diameter'], floor=rungs[0]['via_diameter'])
+        vd = stored_value(rungs[0]['via_drill'], floor=rungs[0]['via_drill'])
         if vs < config.via_size - 1e-9:
             out.append((vs, vd))
     return out

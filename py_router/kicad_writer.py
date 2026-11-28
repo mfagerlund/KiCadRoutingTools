@@ -325,6 +325,11 @@ def move_copper_graphics_to_silkscreen(content: str) -> str:
 EDGE_ROUNDING_MM = 2 ** 0.5 * 1e-6
 
 
+def _stored(v):
+    from routing_utils import stored_value
+    return stored_value(v)
+
+
 def generate_segment_sexpr(start: Tuple[float, float], end: Tuple[float, float],
                            width: float, layer: str, net_id: int,
                            net_name: str = None) -> str:
@@ -337,7 +342,7 @@ def generate_segment_sexpr(start: Tuple[float, float], end: Tuple[float, float],
     return f'''	(segment
 		(start {start[0]:.6f} {start[1]:.6f})
 		(end {end[0]:.6f} {end[1]:.6f})
-		(width {width})
+		(width {_stored(width)})
 		(layer "{layer}")
 		{net_str}
 		(uuid "{uuid.uuid4()}")

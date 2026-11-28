@@ -1076,9 +1076,11 @@ def _precompute_net_obstacles(pcb_data: PCBData, net_id: int, config: GridRouteC
                                 blocked_cells_set, blocked_vias_set,
                                 obs_clearance=(obs_clearance if config.scoped_clearance is None
                                                else config.pad_obstacle_clearance(pad)))
-    if getattr(config, 'hole_rules', None) is not None:
-        # #1853: the pads' HOLES at a hole_clearance rule, as the base map
-        # holds the pads of the nets a step does not route
+    from obstacle_map import pad_hole_floor
+    if getattr(config, 'hole_rules', None) is not None or pad_hole_floor(config) > 0:
+        # #1853: the pads' HOLES at a hole_clearance rule (and KICAD_HOLE_FLOOR's
+        # board minimum), as the base map holds the pads of the nets a step
+        # does not route
         from obstacle_map import stamp_hole_rule_pad_holes
         stamp_hole_rule_pad_holes(_CellCollector(blocked_cells_set, blocked_vias_set),
                                   pads, config, extra_clearance)
