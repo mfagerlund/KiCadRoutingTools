@@ -2787,6 +2787,12 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                 # ladder behind them (fix direction 2). INTERNAL: set only
                 # by the finalize custody handoff; deliberately no CLI flag.
                 oracle_links: Optional[List] = None,
+                # INTERNAL (reconcile sub-run only, no CLI flag): names of the
+                # nets that were CONNECTED on the outer run's input and that
+                # the outer run broke (its pre-existing rip victims). In the
+                # sub-run they are routing targets, so the #622 victim sweep
+                # would otherwise see them as plain squatters.
+                input_custody: Optional[List[str]] = None,
                 # #581: edge-to-edge clearance between every via this run
                 # places and same-net SMD pads. None (default) -> auto-read
                 # the persisted .kicad_pro record; > 0 activates (and is
@@ -2896,7 +2902,9 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                # #572: links describe ONE board state; only the finalize
                # custody handoff may set them on a sub-run, never blanket
                # forwarding.
-               'oracle_links'):
+               'oracle_links',
+               # set only by the outer run for its reconcile sub-run
+               'input_custody'):
         _reconcile_kwargs.pop(_k, None)
     # #572 lap-authority channel: cleared at ENTRY so an early return can
     # never leave a previous invocation's hints for the caller to harvest.
@@ -3756,6 +3764,7 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
     # tier exists to pre-empt -- measured, firing in the outermost run's
     # loop or drain regressed a clean control both times (yz2, za2).
     config.final_reconcile = final_reconcile
+    config.input_custody = frozenset(input_custody or ())
     if config.ripup_blocker_select != 'count':
         print(f"Rip-up blocker-select algorithm: {config.ripup_blocker_select}")
 
@@ -8992,6 +9001,15 @@ def batch_route(input_file: str, output_file: str, net_names: List[str],
                     _forced659.extend(_fresh659)
             if _forced659:
                 _rk['oracle_links'] = _forced659
+            # Input custody: the retried nets that were connected on THIS
+            # run's input and broken by it (pre-existing rip victims). The
+            # sub-run's #622 sweep must not hand their channel to a net this
+            # run routed (victim_may_displace).
+            _pe_names9 = set((getattr(pcb_data, '_preexisting_rips', None)
+                              or {}).values())
+            _custody9 = sorted(n for n in set(_rec_names) if n in _pe_names9)
+            if _custody9:
+                _rk['input_custody'] = _custody9
             # #527 follow-up: the inner run forwards the SAME progress
             # callback, so its routing/rescue/cleanup messages were pixel-
             # identical to the first pass's and the GUI looked like it ran
