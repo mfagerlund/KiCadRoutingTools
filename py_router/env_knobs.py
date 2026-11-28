@@ -330,6 +330,9 @@ def refresh() -> None:
     g['VIA_RUNG_2'] = os.environ.get('KICAD_VIA_RUNG', '2') == '2'
     g['ESCAPE_RESERVE'] = _opt_in('KICAD_ESCAPE_RESERVE')  # plan and reserve a dog-bone (stub + via) per fine-pitch pin before routing (opt-in)
     g['FINE_NET_FLOOR'] = _opt_in('KICAD_FINE_NET_FLOOR')  # fine-pin signal nets route at the board's minimum track width, others keep theirs (opt-in)
+    # exact corner ring only on pads whose short side is below this (mm):
+    # fine-pitch escape pads; wider pads keep the uniform ring. 0 = every pad.
+    g['RELAX_CORNER_FINE'] = _f('KICAD_RELAX_CORNER_FINE', 0.4)
     g['RELAX_CORNER'] = _opt_in('KICAD_RELAX_CORNER')  # pad keep-outs without the half-cell corner buffer (opt-in)
     g['RELAX_VIA_GRID'] = _opt_in('KICAD_RELAX_VIA_GRID')  # via track keep-out at its exact radius, not rounded up to whole cells (opt-in)
     g['HOLE_FLOOR'] = _opt_in('KICAD_HOLE_FLOOR')  # new vias and tracks hold the board's hole clearance at every clearance rung (opt-in)

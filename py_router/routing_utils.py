@@ -203,10 +203,12 @@ def iter_pad_blocked_cells(
     # cell center. This applies to ALL pad shapes since diagonal approaches
     # can occur with rectangular pads too. Callers whose geometry adds further
     # sub-grid deviation (diff pair P/N offsets) pass a larger buffer.
-    # KICAD_RELAX_CORNER: the ring margin..margin+buffer is blocked only
-    # where a grid step from that cell to a free cell would clip the pad
-    # (ring_cell_blocked); a caller's explicit buffer stays uniform.
-    exact_ring = corner_buffer is None and env_knobs.RELAX_CORNER
+    # KICAD_RELAX_CORNER: on a fine-pitch pad (exact_ring_pad) the ring
+    # margin..margin+buffer is blocked only where a grid step from that cell
+    # to a free cell would clip the pad (ring_cell_blocked); other pads and
+    # a caller's explicit buffer keep the uniform ring.
+    exact_ring = (corner_buffer is None and env_knobs.RELAX_CORNER
+                  and exact_ring_pad(half_width, half_height))
     if corner_buffer is None:
         corner_buffer = (step_corner_buffer(margin, corner_radius, grid_step)
                          if env_knobs.RELAX_CORNER else grid_step / 2)
@@ -315,10 +317,12 @@ def pad_blocked_cells_array(
     frame -- for diagonal pads (pad.rect_rotation). 0 (axis-aligned, the common
     case) takes the original bit-identical code path.
     """
-    # KICAD_RELAX_CORNER: the ring margin..margin+buffer is blocked only
-    # where a grid step from that cell to a free cell would clip the pad
-    # (ring_cell_blocked); a caller's explicit buffer stays uniform.
-    exact_ring = corner_buffer is None and env_knobs.RELAX_CORNER
+    # KICAD_RELAX_CORNER: on a fine-pitch pad (exact_ring_pad) the ring
+    # margin..margin+buffer is blocked only where a grid step from that cell
+    # to a free cell would clip the pad (ring_cell_blocked); other pads and
+    # a caller's explicit buffer keep the uniform ring.
+    exact_ring = (corner_buffer is None and env_knobs.RELAX_CORNER
+                  and exact_ring_pad(half_width, half_height))
     if corner_buffer is None:
         corner_buffer = (step_corner_buffer(margin, corner_radius, grid_step)
                          if env_knobs.RELAX_CORNER else grid_step / 2)
@@ -725,3 +729,12 @@ def ring_cell_blocked(cell_x, cell_y, grid_step, rotation_deg,
                               corner_radius, margin_sq):
                 return True
     return False
+
+
+def exact_ring_pad(half_width, half_height):
+    """True when a pad gets the exact corner ring: its short side is below
+    KICAD_RELAX_CORNER_FINE (0 = every pad). The uniform ring costs the
+    escape cells between and beyond fine-pitch pads; on wider pads it costs
+    little and the exact ring's sparser keep-out loses elsewhere."""
+    lim = env_knobs.RELAX_CORNER_FINE
+    return lim <= 0 or 2.0 * min(half_width, half_height) < lim
